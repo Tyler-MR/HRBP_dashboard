@@ -1,0 +1,27 @@
+# 环境变量与凭证 — 绝不提交
+.env
+*.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# 数据库（含真实数据）
+*.db
+*.sqlite
+*.sqlite3
+
+# 临时文件
+dept_tmp*.json
+*.tmp
+.DS_Store
+Thumbs.db
