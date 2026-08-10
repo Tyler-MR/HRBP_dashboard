@@ -1,7 +1,7 @@
-# 环境变量与凭证 — 绝不提交
+# 环境变量与凭证 — 绝不提交（.env.example 模板除外）
 .env
-*.env
 .env.*
+!.env.example
 
 # Python
 __pycache__/
