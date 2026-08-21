@@ -42,6 +42,7 @@ class Employee(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False, comment="姓名")
     department = Column(String(100), comment="所属部门")
+    position = Column(String(100), comment="岗位名称（钉钉花名册 sys00-position）")
     age = Column(Integer, comment="年龄")
     education = Column(String(20), comment="学历: 高中/中专, 大专, 本科, 硕士, 博士")
     tenure_years = Column(Float, default=0, comment="司龄（年）")
@@ -126,3 +127,28 @@ class Candidate(Base):
     created_at = Column(DateTime, default=datetime.now)
 
     position = relationship("Position", back_populates="candidates")
+
+
+class DailyLog(Base):
+    """管理人员日志（钉钉日报）— 原始内容 + 规则评分结果"""
+    __tablename__ = "daily_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(String(64), unique=True, index=True, comment="钉钉日志ID")
+    template_name = Column(String(100), comment="日志模板名称")
+    creator_name = Column(String(50), index=True, comment="日志创建人")
+    creator_id = Column(String(64), comment="日志创建人userId")
+    dept_name = Column(String(100), comment="部门")
+    create_time = Column(DateTime, index=True, comment="日志创建时间")
+    contents = Column(String, comment="日志内容JSON（字段key/value）")
+
+    # ── 评分（满分100，规则引擎，口径见 log_eval.py）──
+    score_total = Column(Integer, default=0, comment="总分 0-100")
+    score_completeness = Column(Integer, default=0, comment="内容完整度 25分")
+    score_data = Column(Integer, default=0, comment="数据支撑度 20分")
+    score_structure = Column(Integer, default=0, comment="结构化程度 15分")
+    score_planning = Column(Integer, default=0, comment="规划性 20分")
+    score_depth = Column(Integer, default=0, comment="复盘深度 20分")
+    strengths = Column(String(500), default="", comment="优点（自动生成）")
+    improvements = Column(String(500), default="", comment="需改进方向（自动生成）")
+    evaluated_at = Column(DateTime, default=datetime.now, comment="评分时间")

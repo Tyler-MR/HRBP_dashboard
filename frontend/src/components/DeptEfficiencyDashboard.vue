@@ -127,17 +127,27 @@
               <th>姓名</th>
               <th>职位</th>
               <th>评分</th>
+              <th>雷达评估维度</th>
               <th>关键指标</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(m, i) in activeDept.members" :key="m.name"
+            <tr v-for="(m, i) in sortedMembers" :key="m.name"
                 :class="{ 'top-row': i === 0 }"
                 @click="openDrawer(m)" style="cursor:pointer">
               <td class="m-name">{{ m.name }}</td>
               <td class="m-pos">{{ m.position }}</td>
               <td class="m-score">
                 <span class="score-badge" :class="scoreClass(m.score, m.score_max)">{{ m.score }}<em class="sc-max">/{{ m.score_max }}</em></span>
+              </td>
+              <td class="m-radar-dims">
+                <span class="mrd-chip" v-for="d in (memberRadarDims[m.name] || [])" :key="d.dimension"
+                      :class="d.score > 0 ? 'mrd-scored' : 'mrd-empty'"
+                      :title="d.standard || d.dimension">
+                  <span class="mrd-dim">{{ d.dimension }}</span>
+                  <em class="mrd-score">{{ d.score }}<i class="mrd-max">/{{ d.max }}</i></em>
+                </span>
+                <span v-if="!(memberRadarDims[m.name] || []).length" class="mrd-none">—</span>
               </td>
               <td class="m-metrics">
                 <span class="mm-item" v-for="mt in m.metrics" :key="mt.name">
@@ -221,6 +231,11 @@ const radarRef = ref(null)
 const circ = 2 * Math.PI * 50
 
 const activeDept = computed(() => departments.value.find(d => d.department === current.value))
+// 成员人效按贡献数值（评分）从高到低排列（评分动态变化，实时排序）
+const sortedMembers = computed(() => {
+  const members = activeDept.value?.members || []
+  return [...members].sort((a, b) => (b.score || 0) - (a.score || 0))
+})
 // 拼多多团队：指标圆环深蓝填充（无目标值，按用户要求整环填充）
 const isPddDept = computed(() => activeDept.value?.department === '拼多多团队')
 // 产品团队：指标带 group（产品部/设计部）→ 按维度分两行展示
@@ -465,6 +480,31 @@ function renderRadar() {
 
 watch(activeDept, () => { nextTick(renderRadar) }, { deep: true })
 
+// 成员表格雷达评估维度（每人 5 维 + 已评分数 + 评分标准，来自 /member-radar）
+const memberRadarDims = ref({})
+
+async function loadMemberRadarDims() {
+  const deptName = activeDept.value?.department
+  if (!deptName) return
+  try {
+    const res = await api.get('/member-radar', { params: { department: deptName } })
+    const dimsMap = Object.fromEntries((res.data.dims || []).map(d => [d.dimension, d]))
+    const map = {}
+    for (const it of res.data.items || []) {
+      map[it.name] = Object.keys(it.scores || {}).map(dim => ({
+        dimension: dim,
+        max: dimsMap[dim]?.max || 100,
+        standard: dimsMap[dim]?.standard || '',
+        score: it.scores?.[dim] ?? 0,
+      }))
+    }
+    memberRadarDims.value = map
+  } catch (e) {
+    console.error(e)
+    memberRadarDims.value = {}
+  }
+}
+
 async function loadData() {
   loading.value = true
   try {
@@ -475,6 +515,8 @@ async function loadData() {
   } catch (e) { console.error(e) } finally { loading.value = false }
 }
 
+// 切换部门/加载数据后刷新成员雷达维度列
+watch(activeDept, () => { nextTick(loadMemberRadarDims) }, { deep: true })
 onMounted(() => { loadData(); timer = setInterval(loadData, 30000); window.addEventListener('resize', () => { Object.values(radarCharts).forEach(c => c?.resize()); memberRadarChart?.resize(); dailyChart?.resize() }) })
 onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
@@ -624,6 +666,16 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .m-name { font-weight: 600; color: #1a1a2e; }
 .m-pos { color: #6b7280; }
 .m-score { text-align: center; }
+/* 雷达评估维度列：维度 chips（已评分=翠绿底+分数，未评分=灰底；文字过长自动换行） */
+.m-radar-dims { display: flex; flex-wrap: wrap; gap: 4px; max-width: 430px; }
+.mrd-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; padding: 2px 8px; border-radius: 9px; cursor: help; line-height: 1.45; text-align: left; overflow-wrap: break-word; word-break: break-all; }
+.mrd-scored { background: #d1fae5; color: #047857; border: 1px solid #a7f3d0; }
+.mrd-empty { background: #f3f4f6; color: #9ca3af; border: 1px solid #e5e7eb; }
+.mrd-dim { font-weight: 500; }
+.mrd-score { font-style: normal; font-weight: 700; font-size: 10px; color: #065f46; flex-shrink: 0; }
+.mrd-empty .mrd-score { color: #9ca3af; }
+.mrd-max { font-style: normal; font-size: 9px; font-weight: 400; opacity: 0.6; margin-left: 1px; }
+.mrd-none { color: #d1d5db; font-size: 11px; }
 .score-badge { display: inline-block; padding: 1px 8px; border-radius: 8px; font-size: 12px; font-weight: 700; }
 .sc-max { font-style: normal; font-size: 10px; font-weight: 500; opacity: 0.6; margin-left: 1px; }
 .sc-a { background: #d1fae5; color: #059669; }

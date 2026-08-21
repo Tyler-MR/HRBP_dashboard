@@ -19,6 +19,12 @@
         <router-link to="/dept-efficiency" class="nav-link" active-class="nav-active">
           🏢 部门人效看板
         </router-link>
+        <router-link to="/logs" class="nav-link" active-class="nav-active">
+          📝 管理人员日志评分
+        </router-link>
+        <router-link to="/onduty" class="nav-link" active-class="nav-active">
+          ⏱️ 在岗时长看板
+        </router-link>
       </div>
       <button class="sync-btn" @click="syncDingTalk" :disabled="syncing">
         {{ syncing ? '⏳ 同步中' : '🔄 同步钉钉' }}

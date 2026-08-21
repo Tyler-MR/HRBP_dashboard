@@ -111,6 +111,24 @@ _MEMBER_POSITIONS = {
 }
 
 
+def _roster_active(name: str) -> bool:
+    """花名册在职状态：查不到（经营数据含非花名册负责人/店铺名）→ 保留；已离职(is_active=no) → 过滤。
+
+    与钉钉花名册同步一致（用户口径 2026-08-11）：离职人员不显示在部门人效里。
+    """
+    try:
+        from database import SessionLocal
+        from models import Employee
+        db = SessionLocal()
+        try:
+            r = db.query(Employee).filter(Employee.name == name).first()
+            return True if r is None else r.is_active == "yes"
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — 本地库异常不阻断经营数据
+        return True
+
+
 def _error_dept(msg: str) -> DeptEfficiency:
     """数据源不可用时的降级返回：不携带任何客观指标/成员（不显示假数据）。"""
     return DeptEfficiency(
@@ -208,6 +226,8 @@ def build_pdd_dept() -> DeptEfficiency:
     ranked = sorted(members_raw, key=lambda r: r["revenue"], reverse=True)
     max_rev = ranked[0]["revenue"] if ranked else 0.0
     for r in ranked:
+        if not _roster_active(r["person"]):
+            continue  # 已离职，不显示在部门人效（与钉钉花名册同步）
         rev_wan = r["revenue"] / 10000.0
         per_store = rev_wan / r["stores"] if r["stores"] else 0.0
         profit_wan = r["profit"] / 10000.0

@@ -6,7 +6,7 @@
 │    - 月度已上线数   = 上述记录中「当前已上线渠道」有值（非空）的记录数
 │    - 月度达成率     = 月度已上线数 / 月度目标上线数（目标为 0 时不除零）
 │    - 负责人达成率   = 该产品负责人本人 已上线数 / 目标上线数（用户已确认为标准口径）
-└─ 🎨 设计维度：表「设计每日稿件统计」 base gvNG4YZ7JnYXOKQ7SNMXj9n4V2LD0oRE / sheet AopIE84
+└─ 🎨 设计维度：表「设计每日稿件统计」 base jb9Y4gmKWrOZdDQYS46kzd0bVGXn6lpz / sheet 3rpDrEF（2026-08-11 起与产品表同 base）
      - 月度设计数 = 日期(毫秒时间戳)所在月 == 看板设定月 的记录数
      - 月度通过数 = 上述记录中「是否通过」= '通过' 的记录数（企业口径：仅'通过'算通过）
      - 月度通过率 = 月度通过数 / 月度设计数（用户已确认为标准口径；设计数为 0 时不除零）
@@ -37,9 +37,9 @@ P_DATE_FIELD = "预计上线日期"       # text: "8月27日"（无年份）
 P_CHANNEL_FIELD = "当前已上线渠道"  # multipleSelect: 有值 = 已上线
 P_OWNER_FIELD = "产品负责人"       # singleSelect
 
-# ── 设计维度：设计每日稿件统计 ──
-DESIGN_BASE = "gvNG4YZ7JnYXOKQ7SNMXj9n4V2LD0oRE"
-DESIGN_SHEET = "AopIE84"
+# ── 设计维度：设计每日稿件统计（2026-08-11 起与产品表同 base，sheet 名「设计每日稿件统计」）──
+DESIGN_BASE = "jb9Y4gmKWrOZdDQYS46kzd0bVGXn6lpz"
+DESIGN_SHEET = "3rpDrEF"
 D_DATE_FIELD = "日期"              # date: 毫秒时间戳
 D_PASS_FIELD = "是否通过"          # singleSelect: 仅 '通过' 算通过
 D_OWNER_FIELD = "设计人员"         # singleSelect
@@ -137,6 +137,43 @@ def _channel_has_value(val: Any) -> bool:
 def _is_pass(val: Any) -> bool:
     """是否通过 == '通过'（企业自定义口径：仅'通过'算通过）。"""
     return _extract_name(val) == "通过"
+
+
+def _roster_position(name: str) -> str:
+    """查花名册真实岗位（钉钉 sys00-position，本地 Employee 表），查不到返回空串。
+
+    产品/设计团队岗位以花名册为准（用户口径 2026-08-11）；多维表离职人员（如董晗悦）
+    查不到岗位时由调用方回退原岗位名（产品负责人/设计人员）。
+    """
+    try:
+        from database import SessionLocal
+        from models import Employee
+        db = SessionLocal()
+        try:
+            r = db.query(Employee).filter(Employee.name == name).first()
+            return (r.position or "") if r else ""
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — 本地库异常不阻断多维表数据
+        return ""
+
+
+def _roster_active(name: str) -> bool:
+    """花名册在职状态：查不到（多维表新成员，花名册尚未同步）→ 保留；已离职(is_active=no) → 过滤。
+
+    与钉钉花名册同步一致（用户口径 2026-08-11）：离职人员不显示在部门人效里。
+    """
+    try:
+        from database import SessionLocal
+        from models import Employee
+        db = SessionLocal()
+        try:
+            r = db.query(Employee).filter(Employee.name == name).first()
+            return True if r is None else r.is_active == "yes"
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 — 本地库异常不阻断多维表数据
+        return True
 
 
 def _error_dept(msg: str) -> DeptEfficiency:
@@ -255,36 +292,40 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
         logger.error("产品数据源不可用: %s", e)
         return _error_dept(f"钉钉多维表拉取失败：{e}")
 
-    # ═══ 产品维度 ═══
+    # ═══ 产品维度（离职人员不参与统计，与花名册同步）═══
     prod_target = prod_launched = 0
     prod_owner_stat: Dict[str, dict] = {}
     for rec in prod_records:
         fields = rec.get("fields", rec)
+        owner = _extract_name(fields.get(P_OWNER_FIELD))
+        if owner and not _roster_active(owner):
+            continue  # 已离职，不显示在部门人效
         if _parse_month(fields.get(P_DATE_FIELD)) != ym:
             continue
         prod_target += 1
         has_channel = _channel_has_value(fields.get(P_CHANNEL_FIELD))
         if has_channel:
             prod_launched += 1
-        owner = _extract_name(fields.get(P_OWNER_FIELD))
         if owner:
             st = prod_owner_stat.setdefault(owner, {"target": 0, "launched": 0})
             st["target"] += 1
             if has_channel:
                 st["launched"] += 1
 
-    # ═══ 设计维度 ═══
+    # ═══ 设计维度（离职人员不参与统计，与花名册同步）═══
     design_n = design_pass = 0
     design_owner_stat: Dict[str, dict] = {}
     for rec in design_records:
         fields = rec.get("fields", rec)
+        owner = _extract_name(fields.get(D_OWNER_FIELD))
+        if owner and not _roster_active(owner):
+            continue  # 已离职，不显示在部门人效
         if _parse_month(fields.get(D_DATE_FIELD)) != ym:
             continue
         design_n += 1
         passed = _is_pass(fields.get(D_PASS_FIELD))
         if passed:
             design_pass += 1
-        owner = _extract_name(fields.get(D_OWNER_FIELD))
         if owner:
             st = design_owner_stat.setdefault(owner, {"design": 0, "passed": 0})
             st["design"] += 1
@@ -303,13 +344,13 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
         DeptMetric(name="月度通过率", value=round(design_rate * 100, 2), unit="%", target=None, trend="stable", group="设计部"),
     ]
 
-    # ── 成员明细：产品负责人 + 设计人员 ──
+    # ── 成员明细：产品负责人 + 设计人员（岗位名以花名册 sys00-position 为准）──
     members: List[DeptMember] = []
     for owner, st in sorted(prod_owner_stat.items(), key=lambda x: -x[1]["target"]):
         o_rate = st["launched"] / st["target"] if st["target"] else 0.0
         members.append(DeptMember(
             name=owner,
-            position="产品负责人",
+            position=_roster_position(owner) or "产品负责人",
             score=round(o_rate * 100, 1),
             metrics=[
                 MemberMetric(name="月度目标上线数", value=st["target"], unit="个"),
@@ -322,7 +363,7 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
         o_rate = st["passed"] / st["design"] if st["design"] else 0.0
         members.append(DeptMember(
             name=owner,
-            position="设计人员",
+            position=_roster_position(owner) or "设计人员",
             score=round(o_rate * 100, 1),
             metrics=[
                 MemberMetric(name="月度设计数", value=st["design"], unit="个"),

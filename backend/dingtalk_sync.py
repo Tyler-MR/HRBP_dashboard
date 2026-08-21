@@ -332,6 +332,7 @@ def sync_employees() -> dict[str, Any]:
                 logger.info("跳过排除人员: %s", name)
                 continue
             dept = _extract_field(raw, "sys00-dept") or _extract_field(raw, "sys00-mainDept") or "未知部门"
+            pos = _extract_field(raw, "sys00-position") or ""
             hired = _extract_field(raw, "sys00-confirmJoinTime") or ""
             edu = _extract_field(raw, "sys03-highestEdu") or ""
             emp_status = _extract_field(raw, "sys01-employeeStatus") or _extract_field(raw, "sys00-employeeStatus") or ""
@@ -378,6 +379,7 @@ def sync_employees() -> dict[str, Any]:
             if existing:
                 existing.age = age
                 existing.education = education
+                existing.position = pos
                 existing.tenure_years = tenure
                 existing.hired_date = _parse_hired_date(hired)
                 existing.employee_status = employee_status
@@ -386,6 +388,7 @@ def sync_employees() -> dict[str, Any]:
                 emp = Employee(
                     name=name,
                     department=dept,
+                    position=pos,
                     age=age,
                     education=education,
                     tenure_years=tenure,

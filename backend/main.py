@@ -14,7 +14,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import engine, Base, get_db, SessionLocal
-from models import Recruiter, Position, Candidate, Employee, HrEfficiency, TalentProfile, MemberScore
+from models import Recruiter, Position, Candidate, Employee, HrEfficiency, TalentProfile, MemberScore, DailyLog
 from schemas import (
     DashboardResponse, OverviewStats, FunnelData, FunnelStage,
     PositionStat, OfferStatusItem, OfferStatusData, RecruiterOutput,
@@ -384,6 +384,14 @@ def _auto_sync_loop():
             logger.exception("❌ 自动同步失败: %s", e)
         finally:
             _sync_lock.release()
+
+        # ── 花名册同步（独立锁，离职状态与钉钉保持一致；失败不影响招聘同步）──
+        try:
+            from dingtalk_sync import sync_employees
+            r = sync_employees()
+            logger.info("✅ 花名册自动同步: %s 人 (message=%s)", r.get("synced", 0), r.get("message", ""))
+        except Exception as e:
+            logger.exception("❌ 花名册自动同步失败: %s", e)
 
 def _start_auto_sync():
     """在后台线程中启动自动同步"""
@@ -1198,7 +1206,7 @@ def _hr_team_members():
                 ev += f" · {r.hired_date}入职"
             members.append(DeptMember(
                 name=r.name,
-                position=group,
+                position=r.position or group,  # 钉钉真实岗位（sys00-position），空值回退组名
                 score=0.0,  # 未评分，抽屉内由 MemberScore 覆盖
                 metrics=[
                     MemberMetric(name="司龄", value=round(r.tenure_years or 0, 1), unit="年"),
@@ -1230,7 +1238,7 @@ def _procurement_team_members():
             ev = f"采购部 · {status}" + (f" · {r.hired_date}入职" if r.hired_date else "")
             members.append(DeptMember(
                 name=r.name,
-                position="采购人员",
+                position=r.position or "采购人员",  # 钉钉真实岗位（sys00-position），空值回退
                 score=0.0,  # 未评分，抽屉内由 MemberScore 覆盖
                 metrics=[
                     MemberMetric(name="司龄", value=round(r.tenure_years or 0, 1), unit="年"),
@@ -1250,6 +1258,7 @@ def _roster_dept_members(departments, position):
 
     与 _procurement_team_members/_hr_team_members 同款：指标=司龄/在职天数，
     evaluation=部门·状态·入职日期，score=0（未评分，抽屉内由 MemberScore 覆盖）。
+    position: 无钉钉岗位时的回退岗位名（如"客服人员"/"财务人员"）。
     """
     from database import SessionLocal
     from models import Employee
@@ -1267,7 +1276,7 @@ def _roster_dept_members(departments, position):
             ev = f"{r.department} · {status}" + (f" · {r.hired_date}入职" if r.hired_date else "")
             members.append(DeptMember(
                 name=r.name,
-                position=position,
+                position=r.position or position,  # 钉钉真实岗位（sys00-position），空值回退
                 score=0.0,  # 未评分，抽屉内由 MemberScore 覆盖
                 metrics=[
                     MemberMetric(name="司龄", value=round(r.tenure_years or 0, 1), unit="年"),
@@ -1577,7 +1586,8 @@ def _member_radar_max(department: str, member: str = None, position: str = "", d
 def _member_radar_dims(department: str, member: str = None, position: str = ""):
     """按部门（人力团队按成员组、产品团队按产品/设计岗位）返回个人雷达图维度。"""
     if department == "产品团队":
-        if position == "设计人员":
+        # 岗位名以花名册为准（设计/美工→设计维度；产品岗位→产品维度；兼容旧值"设计人员"）
+        if "设计" in position or "美工" in position:
             return DESIGN_MEMBER_RADAR_DIMS
         return PRODUCT_OWNER_DIMS
     if department in ("拼多多团队", "淘宝团队"):
@@ -1587,8 +1597,9 @@ def _member_radar_dims(department: str, member: str = None, position: str = ""):
     if department == "客服团队":
         return CUSTOMER_MEMBER_RADAR_DIMS
     if department == "人力团队":
-        # 真实花名册成员按 position（招聘人员/行政人员）归组；兼容旧姓名映射
-        if position == "招聘人员" or _HR_ADMIN_MEMBER_GROUP.get(member) == "招聘组":
+        # 真实花名册成员按岗位归组（钉钉 sys00-position：含"招聘"→招聘组，否则→行政组）
+        # 兼容旧值"招聘人员"/"行政人员"及旧姓名映射
+        if "招聘" in position or _HR_ADMIN_MEMBER_GROUP.get(member) == "招聘组":
             return HR_RECRUIT_DIMS
         return HR_ADMIN_DIMS
     return MEMBER_RADAR_DIMS
@@ -1609,7 +1620,11 @@ def get_member_radar(department: str, db: Session = Depends(get_db)):
         scores = {dim: score_map.get((m.name, dim)) for dim in dims}
         last = max((r.updated_at for r in rows if r.member_name == m.name), default="")
         items.append(MemberScoreItem(name=m.name, position=m.position, scores=scores, updated_at=last))
-        std = _RADAR_STANDARDS_BY_ROLE.get(m.position) or _RADAR_STANDARDS_BY_ROLE.get(department, {})
+        # 产品团队岗位名以花名册为准（设计/美工/产品储备主管等），按维度集取标准
+        if department == "产品团队":
+            std = DESIGN_RADAR_STANDARDS if dims == DESIGN_MEMBER_RADAR_DIMS else PRODUCT_RADAR_STANDARDS
+        else:
+            std = _RADAR_STANDARDS_BY_ROLE.get(m.position) or _RADAR_STANDARDS_BY_ROLE.get(department, {})
         for d in dims:  # 维度并集（产品团队=产品5维+设计5维），标准按岗位取
             dims_info.setdefault(d, std.get(d, ""))
     dims = [RadarDimInfo(dimension=d, max=_member_radar_max(department, dimension=d),
@@ -1804,3 +1819,564 @@ def sync_recruitment():
         }
     finally:
         _sync_lock.release()
+
+
+# ═══════════════════════════════════════════════════
+# 管理人员日志评分（钉钉日报 → 规则评分 → 排名/优点/需改进）
+# ═══════════════════════════════════════════════════
+
+def _logs_period_range(period: str) -> tuple:
+    """按粒度取「本周期至今」时间区间。"""
+    now = datetime.now()
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if period == "month":
+        pass
+    elif period == "quarter":
+        start = now.replace(month=((now.month - 1) // 3) * 3 + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period == "half":
+        start = now.replace(month=(1 if now.month <= 6 else 7), day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif period == "year":
+        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    return start, now
+
+
+def _logs_text(logs) -> str:
+    """合并多条日志 contents（JSON）的 value 为全文。"""
+    import json as _json
+    parts = []
+    for l in logs:
+        try:
+            contents = _json.loads(l.contents) if l.contents else []
+        except Exception:
+            contents = []
+        parts.extend((c.get("value") or "") for c in contents if c.get("value"))
+    return "\n".join(parts)
+
+
+@app.post("/api/sync-logs")
+def sync_logs_api(days: int = Query(180, ge=1, le=180)):
+    """从钉钉拉取日志 → 规则评分 → 入库（手动触发）。"""
+    from dingtalk_logs_sync import sync_logs
+    result = sync_logs(days)
+    return {**result, "note": "日志已按规则评分（完整度25/数据20/结构15/规划20/深度20）"}
+
+
+@app.get("/api/logs-ranking")
+def logs_ranking(period: str = Query("month", description="month/quarter/half/year"),
+                 dept: str = Query("", description="部门筛选（空=全部）"),
+                 db: Session = Depends(get_db)):
+    """管理人员日志评分排名（仅名单内 17 人，按人聚合平均分降序）。
+    综合评估 = 五维日志质量 + 岗位职责契合 + 业绩导向 + 团队管理 → 综合评级 A/B/C/D + 综合点评。"""
+    from collections import defaultdict
+    from log_eval import (person_profile, evaluate_role_fit,
+                          evaluate_industry_focus, comprehensive_eval,
+                          _PERF_GROUPS, _MGMT_GROUPS)
+    from manager_list import MANAGERS, MANAGER_NAMES, TITLE_MAP, ROLE_KEYWORDS
+
+    start, end = _logs_period_range(period)
+    q = db.query(DailyLog).filter(
+        DailyLog.create_time >= start, DailyLog.create_time <= end,
+        DailyLog.creator_name.in_(MANAGER_NAMES))
+    if dept:
+        q = q.filter(DailyLog.dept_name == dept)
+    rows = q.all()
+
+    # 全员（名单内）平均 — 作为相对参照（key 不带 score_ 前缀，与 person_profile 对齐）
+    all_avg = {}
+    if rows:
+        n = len(rows)
+        for dim in ["completeness", "data", "structure", "planning", "depth"]:
+            all_avg[dim] = sum(getattr(l, "score_" + dim) or 0 for l in rows) / n
+
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r.creator_name].append(r)
+
+    people = []
+    for name, title in MANAGERS:
+        key_logs = groups.get(name, [])
+        if not key_logs:
+            people.append({"name": name, "title": title, "dept": "", "log_count": 0,
+                           "avg_score": 0, "avg_completeness": 0, "avg_data": 0,
+                           "avg_structure": 0, "avg_planning": 0, "avg_depth": 0,
+                           "role_fit": 0, "role_hit": [], "role_miss": [],
+                           "perf_focus": 0, "mgmt_focus": 0,
+                           "grade": "", "grade_cn": "—", "comp_score": 0, "comment": "",
+                           "strengths": "暂无日志", "improvements": "尚未提交日志",
+                           "last_log_time": ""})
+            continue
+        n = len(key_logs)
+        p_avg = {dim: round(sum(getattr(l, "score_" + dim) or 0 for l in key_logs) / n, 1)
+                 for dim in ["completeness", "data", "structure", "planning", "depth"]}
+        full_text = _logs_text(key_logs)
+        role = evaluate_role_fit(full_text, ROLE_KEYWORDS.get(title, []))
+        perf = evaluate_industry_focus(full_text, _PERF_GROUPS)
+        mgmt = evaluate_industry_focus(full_text, _MGMT_GROUPS)
+        profile = person_profile(p_avg, all_avg, role["role_hit"], role["role_miss"])
+        comp = comprehensive_eval(
+            round(sum(l.score_total or 0 for l in key_logs) / n, 1),
+            role["role_fit"], perf, mgmt,
+            role["role_hit"], role["role_miss"],
+            profile["top_dim"], profile["weak_dim"])
+        latest = max(key_logs, key=lambda l: l.create_time)
+        people.append({
+            "name": name, "title": title, "dept": key_logs[0].dept_name or "",
+            "log_count": n, "avg_score": round(sum(l.score_total or 0 for l in key_logs) / n, 1),
+            **{f"avg_{dim}": p_avg[dim] for dim in ["completeness", "data", "structure", "planning", "depth"]},
+            "role_fit": role["role_fit"], "role_hit": role["role_hit"], "role_miss": role["role_miss"],
+            "perf_focus": perf, "mgmt_focus": mgmt,
+            "grade": comp["grade"], "grade_cn": comp["grade_cn"],
+            "comp_score": comp["comp_score"], "comment": comp["comment"],
+            **profile,
+            "last_log_time": latest.create_time.strftime("%Y-%m-%d"),
+        })
+
+    people.sort(key=lambda p: (-(p["log_count"] > 0), -p["avg_score"]))
+    for i, p in enumerate(people, 1):
+        p["rank"] = i if p["log_count"] > 0 else None
+    return {
+        "period": period,
+        "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"),
+        "total_logs": len(rows), "total_people": len(people),
+        "people": people,
+    }
+
+
+@app.get("/api/logs-evaluation")
+def logs_evaluation(name: str = Query(..., description="人员姓名"),
+                    period: str = Query("month"),
+                    db: Session = Depends(get_db)):
+    """单人日志评估分析报告：五维雷达 + 岗位职责深度评估（含证据）+ 多条优缺点 + 综合评级 + 深度分析建议。"""
+    from manager_list import MANAGER_NAMES, TITLE_MAP, ROLE_KEYWORDS, LEVEL_MAP
+    from log_eval import (evaluate_role_fit, evaluate_industry_focus,
+                          comprehensive_eval, person_profile, build_report_items,
+                          build_deep_advice, data_dim_label,
+                          _PERF_GROUPS, _MGMT_GROUPS)
+    title = TITLE_MAP.get(name, "")
+    if name not in MANAGER_NAMES:
+        return {"name": name, "title": title, "period": period, "detail": [],
+                "radar": [], "recent": [], "total": 0, "avg_score": 0, "role_fit": 0,
+                "role_hit": [], "role_miss": [], "role_detail": [],
+                "perf_focus": 0, "mgmt_focus": 0,
+                "grade": "", "grade_cn": "", "comment": "",
+                "strengths_list": [], "improvements_list": [],
+                "deep_strengths": [], "deep_improvements": []}
+    start, end = _logs_period_range(period)
+    rows = (db.query(DailyLog)
+            .filter(DailyLog.creator_name == name, DailyLog.create_time >= start, DailyLog.create_time <= end)
+            .order_by(DailyLog.create_time).all())
+    if not rows:
+        return {"name": name, "title": title, "period": period, "detail": [],
+                "radar": [], "recent": [], "total": 0, "avg_score": 0, "role_fit": 0,
+                "role_hit": [], "role_miss": [], "role_detail": [],
+                "perf_focus": 0, "mgmt_focus": 0,
+                "grade": "", "grade_cn": "", "comment": "",
+                "strengths_list": [], "improvements_list": [],
+                "deep_strengths": [], "deep_improvements": []}
+    n = len(rows)
+    full_text = _logs_text(rows)
+    role = evaluate_role_fit(full_text, ROLE_KEYWORDS.get(title, []))
+    perf = evaluate_industry_focus(full_text, _PERF_GROUPS)
+    mgmt = evaluate_industry_focus(full_text, _MGMT_GROUPS)
+    avg_score = round(sum(l.score_total or 0 for l in rows) / n, 1)
+
+    # 全员（名单内、同周期）平均 — 相对参照
+    all_rows = (db.query(DailyLog)
+                .filter(DailyLog.create_time >= start, DailyLog.create_time <= end,
+                        DailyLog.creator_name.in_(MANAGER_NAMES)).all())
+    all_avg = {}
+    if all_rows:
+        m = len(all_rows)
+        for dim in ["completeness", "data", "structure", "planning", "depth"]:
+            all_avg[dim] = sum(getattr(l, "score_" + dim) or 0 for l in all_rows) / m
+    p_avg = {dim: round(sum(getattr(l, "score_" + dim) or 0 for l in rows) / n, 1)
+             for dim in ["completeness", "data", "structure", "planning", "depth"]}
+    profile = person_profile(p_avg, all_avg, role["role_hit"], role["role_miss"])
+    comp = comprehensive_eval(avg_score, role["role_fit"], perf, mgmt,
+                              role["role_hit"], role["role_miss"],
+                              profile["top_dim"], profile["weak_dim"])
+    items = build_report_items(avg_score, role, perf, mgmt,
+                               profile["strengths"], profile["improvements"])
+    deep = build_deep_advice(title, ROLE_KEYWORDS.get(title, []), role["role_hit"],
+                             role["role_miss"], profile["weak_dim"], perf, mgmt,
+                             LEVEL_MAP.get(name, ""))
+    detail = [{"date": l.create_time.strftime("%Y-%m-%d"), "template": l.template_name,
+               "score": l.score_total or 0} for l in rows]
+    radar = [
+        {"dimension": "内容完整度", "score": round(sum(l.score_completeness or 0 for l in rows) / n, 1), "max": 25},
+        {"dimension": data_dim_label(title), "score": round(sum(l.score_data or 0 for l in rows) / n, 1), "max": 20},
+        {"dimension": "结构化程度", "score": round(sum(l.score_structure or 0 for l in rows) / n, 1), "max": 15},
+        {"dimension": "规划性", "score": round(sum(l.score_planning or 0 for l in rows) / n, 1), "max": 20},
+        {"dimension": "复盘深度", "score": round(sum(l.score_depth or 0 for l in rows) / n, 1), "max": 20},
+    ]
+    recent = [{"date": l.create_time.strftime("%Y-%m-%d"), "score": l.score_total or 0,
+               "strengths": l.strengths or "", "improvements": l.improvements or ""}
+              for l in rows[-3:]][::-1]
+    return {"name": name, "title": title, "period": period, "detail": detail, "radar": radar,
+            "recent": recent, "total": n,
+            "avg_score": avg_score,
+            "role_fit": role["role_fit"], "role_hit": role["role_hit"],
+            "role_miss": role["role_miss"], "role_detail": role["role_detail"],
+            "perf_focus": perf, "mgmt_focus": mgmt,
+            "grade": comp["grade"], "grade_cn": comp["grade_cn"],
+            "comp_score": comp["comp_score"], "comment": comp["comment"],
+            "strengths_list": items["strengths_list"], "improvements_list": items["improvements_list"],
+            "deep_strengths": deep["deep_strengths"], "deep_improvements": deep["deep_improvements"],
+            "strengths": profile["strengths"], "improvements": profile["improvements"]}
+
+
+# ═══════════════════════════════════════════════════
+# 各部门在岗时长统计及分析建议（钉钉多维表 → 清洗 HH时MM分 → 统计/建议）
+# ═══════════════════════════════════════════════════
+
+@app.get("/api/onduty-stats")
+def onduty_stats(month: str = Query("", description="月份 YYYY-MM，空=最新月份")):
+    """各部门在岗时长统计（部门排行/人均/上下班打卡）+ 规则引擎分析建议。"""
+    from onduty_bi import get_onduty_stats
+    return get_onduty_stats(month or None)
+
+
+@app.get("/api/onduty-detail")
+def onduty_detail(dept: str = Query(..., description="部门名"), month: str = Query("")):
+    """某部门人员明细（每人平均在岗/上下班打卡）。"""
+    from onduty_bi import get_onduty_stats
+    data = get_onduty_stats(month or None)
+    if data.get("source_error"):
+        return {"source_error": data["source_error"], "dept": dept, "persons": []}
+    for d in data.get("depts", []):
+        if d["dept"] == dept:
+            return {"source_error": None, "dept": dept, "month": data["month"],
+                    "persons": d["persons"]}
+    return {"source_error": None, "dept": dept, "month": data["month"], "persons": []}
+
+
+# ═══════════════════════════════════════════════════
+# 管理人员周度日志评分报告（整改 + 通晒）
+# ═══════════════════════════════════════════════════
+
+def _logs_week_bounds(week_label: str) -> tuple:
+    """周标签 'YYYY-Www' → (周一 00:00, 下周一 00:00)，ISO 自然周（周一~周日）。"""
+    try:
+        y, w = str(week_label).split("-W")
+        year, week = int(y), int(w)
+    except (ValueError, AttributeError):
+        raise ValueError(f"周格式应为 YYYY-Www，收到: {week_label}")
+    monday = datetime.strptime(f"{year}-W{week}-1", "%G-W%V-%u")
+    return monday, monday + timedelta(days=7)
+
+
+def _logs_current_week() -> str:
+    iso = datetime.now().isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _logs_week_offset(week_label: str, offset: int) -> str:
+    monday, _ = _logs_week_bounds(week_label)
+    iso = (monday + timedelta(weeks=offset)).isocalendar()
+    return f"{iso[0]}-W{iso[1]:02d}"
+
+
+def _logs_available_weeks(db) -> list:
+    """名单内人员有日志的周标签（近一年），最新在前。"""
+    from manager_list import MANAGER_NAMES
+    rows = db.query(DailyLog.create_time).filter(
+        DailyLog.create_time >= datetime.now() - timedelta(days=365),
+        DailyLog.creator_name.in_(MANAGER_NAMES)).all()
+    weeks = set()
+    for (t,) in rows:
+        iso = t.isocalendar()
+        weeks.add(f"{iso[0]}-W{iso[1]:02d}")
+    return sorted(weeks, reverse=True)
+
+
+def _weekly_person_dict(name: str, title: str, key_logs: list, all_avg: dict) -> dict:
+    """单人周报聚合：五维均分 + 岗位职责 + 业绩/团队 + 综合评级 + 职级覆盖 + 整改建议。"""
+    from log_eval import (person_profile, evaluate_role_fit, evaluate_industry_focus,
+                          comprehensive_eval, evaluate_level_fit, build_rectify_suggestions,
+                          _PERF_GROUPS, _MGMT_GROUPS)
+    from manager_list import ROLE_KEYWORDS, LEVEL_MAP, LEVEL_REQ
+    level = LEVEL_MAP.get(name, "")
+    level_req = LEVEL_REQ.get(level, [])
+    if not key_logs:
+        return {"name": name, "title": title, "level": level, "dept": "", "log_count": 0,
+                "avg_score": 0, "avg_completeness": 0, "avg_data": 0, "avg_structure": 0,
+                "avg_planning": 0, "avg_depth": 0, "role_fit": 0, "role_hit": [],
+                "role_miss": [], "role_detail": [], "perf_focus": 0, "mgmt_focus": 0,
+                "grade": "", "grade_cn": "—", "comp_score": 0, "comment": "",
+                "strengths": "暂无日志", "improvements": "尚未提交日志",
+                "rectify": ["本周未提交日志，无法评估，建议恢复工作日日志提交"],
+                "level_covered": 0, "level_req": level_req, "last_log_time": ""}
+    n = len(key_logs)
+    p_avg = {dim: round(sum(getattr(l, "score_" + dim) or 0 for l in key_logs) / n, 1)
+             for dim in ["completeness", "data", "structure", "planning", "depth"]}
+    full_text = _logs_text(key_logs)
+    role = evaluate_role_fit(full_text, ROLE_KEYWORDS.get(title, []))
+    perf = evaluate_industry_focus(full_text, _PERF_GROUPS)
+    mgmt = evaluate_industry_focus(full_text, _MGMT_GROUPS)
+    profile = person_profile(p_avg, all_avg, role["role_hit"], role["role_miss"])
+    avg_score = round(sum(l.score_total or 0 for l in key_logs) / n, 1)
+    comp = comprehensive_eval(avg_score, role["role_fit"], perf, mgmt,
+                              role["role_hit"], role["role_miss"],
+                              profile["top_dim"], profile["weak_dim"])
+    level_covered, uncov = evaluate_level_fit(full_text, level_req)
+    rectify = build_rectify_suggestions(n, role["role_miss"], profile["weak_dim"],
+                                        perf, mgmt, level, uncov)
+    latest = max(key_logs, key=lambda l: l.create_time)
+    return {"name": name, "title": title, "level": level, "dept": key_logs[0].dept_name or "",
+            "log_count": n, "avg_score": avg_score,
+            **{f"avg_{dim}": p_avg[dim] for dim in ["completeness", "data", "structure", "planning", "depth"]},
+            "role_fit": role["role_fit"], "role_hit": role["role_hit"],
+            "role_miss": role["role_miss"], "role_detail": role["role_detail"],
+            "perf_focus": perf, "mgmt_focus": mgmt,
+            "grade": comp["grade"], "grade_cn": comp["grade_cn"],
+            "comp_score": comp["comp_score"], "comment": comp["comment"],
+            "strengths": profile["strengths"], "improvements": profile["improvements"],
+            "rectify": rectify, "level_covered": level_covered, "level_req": level_req,
+            "last_log_time": latest.create_time.strftime("%Y-%m-%d")}
+
+
+def _logs_weekly_payload(week: str, db) -> dict:
+    """周报核心数据（通晒汇总），供 API 与 Excel 导出共用。"""
+    from manager_list import MANAGERS, MANAGER_NAMES, TITLE_MAP
+    from collections import defaultdict
+    if not week:
+        weeks = _logs_available_weeks(db)
+        week = weeks[0] if weeks else _logs_current_week()
+    start, end = _logs_week_bounds(week)
+    rows = db.query(DailyLog).filter(
+        DailyLog.create_time >= start, DailyLog.create_time < end,
+        DailyLog.creator_name.in_(MANAGER_NAMES)).all()
+
+    all_avg = {}
+    if rows:
+        m = len(rows)
+        for dim in ["completeness", "data", "structure", "planning", "depth"]:
+            all_avg[dim] = sum(getattr(l, "score_" + dim) or 0 for l in rows) / m
+
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r.creator_name].append(r)
+
+    people = []
+    for name, title in MANAGERS:
+        p = _weekly_person_dict(name, title, groups.get(name, []), all_avg)
+        p["title"] = TITLE_MAP.get(name, title)
+        people.append(p)
+    people.sort(key=lambda p: (-(p["log_count"] > 0), -p["avg_score"]))
+    for i, p in enumerate(people, 1):
+        p["rank"] = i if p["log_count"] > 0 else None
+    return {"week": week, "start": start.strftime("%Y-%m-%d"),
+            "end": (end - timedelta(seconds=1)).strftime("%Y-%m-%d"),
+            "total_logs": len(rows), "people": people}
+
+
+@app.get("/api/logs-weekly")
+def logs_weekly(week: str = Query("", description="周标签 YYYY-Www，空=最新周"),
+                name: str = Query("", description="人员姓名，空=17人通晒汇总"),
+                db: Session = Depends(get_db)):
+    """周度日志评分报告：17 人通晒汇总 或 单人周报详情（含整改建议、周环比）。"""
+    from manager_list import MANAGER_NAMES, TITLE_MAP, ROLE_KEYWORDS, LEVEL_MAP, LEVEL_REQ
+    from log_eval import (evaluate_role_fit, evaluate_industry_focus, comprehensive_eval,
+                          person_profile, build_report_items, evaluate_level_fit,
+                          build_rectify_suggestions, data_dim_label, _PERF_GROUPS, _MGMT_GROUPS)
+    payload = _logs_weekly_payload(week, db)
+    week = payload["week"]
+
+    if name:
+        title = TITLE_MAP.get(name, "")
+        if name not in MANAGER_NAMES:
+            return {"name": name, "title": title, "week": week, "total": 0,
+                    "avg_score": 0, "detail": [], "radar": [], "recent": [], "rectify": [],
+                    "prev_week": None, "role_detail": [], "grade": "", "grade_cn": "",
+                    "level": "", "level_covered": 0, "level_req": [], "comment": ""}
+        start, end = _logs_week_bounds(week)
+        rows = (db.query(DailyLog)
+                .filter(DailyLog.creator_name == name,
+                        DailyLog.create_time >= start, DailyLog.create_time < end)
+                .order_by(DailyLog.create_time).all())
+        level = LEVEL_MAP.get(name, "")
+        level_req = LEVEL_REQ.get(level, [])
+        if not rows:
+            return {"name": name, "title": title, "week": week, "total": 0, "avg_score": 0,
+                    "detail": [], "radar": [], "recent": [], "rectify": ["本周未提交日志，无法评估，建议恢复工作日日志提交"],
+                    "prev_week": None, "role_detail": [], "role_fit": 0, "role_hit": [],
+                    "role_miss": [], "perf_focus": 0, "mgmt_focus": 0,
+                    "grade": "", "grade_cn": "", "comp_score": 0, "comment": "",
+                    "strengths_list": [], "improvements_list": [],
+                    "level": level, "level_covered": 0, "level_req": level_req,
+                    "strengths": "暂无日志", "improvements": "尚未提交日志"}
+        n = len(rows)
+        full_text = _logs_text(rows)
+        role = evaluate_role_fit(full_text, ROLE_KEYWORDS.get(title, []))
+        perf = evaluate_industry_focus(full_text, _PERF_GROUPS)
+        mgmt = evaluate_industry_focus(full_text, _MGMT_GROUPS)
+        avg_score = round(sum(l.score_total or 0 for l in rows) / n, 1)
+        p_avg = {dim: round(sum(getattr(l, "score_" + dim) or 0 for l in rows) / n, 1)
+                 for dim in ["completeness", "data", "structure", "planning", "depth"]}
+        # 同周全员平均（相对参照）
+        all_rows = (db.query(DailyLog)
+                    .filter(DailyLog.create_time >= start, DailyLog.create_time < end,
+                            DailyLog.creator_name.in_(MANAGER_NAMES)).all())
+        all_avg = {}
+        if all_rows:
+            m = len(all_rows)
+            for dim in ["completeness", "data", "structure", "planning", "depth"]:
+                all_avg[dim] = sum(getattr(l, "score_" + dim) or 0 for l in all_rows) / m
+        profile = person_profile(p_avg, all_avg, role["role_hit"], role["role_miss"])
+        comp = comprehensive_eval(avg_score, role["role_fit"], perf, mgmt,
+                                  role["role_hit"], role["role_miss"],
+                                  profile["top_dim"], profile["weak_dim"])
+        items = build_report_items(avg_score, role, perf, mgmt,
+                                   profile["strengths"], profile["improvements"])
+        level_covered, uncov = evaluate_level_fit(full_text, level_req)
+        rectify = build_rectify_suggestions(n, role["role_miss"], profile["weak_dim"],
+                                            perf, mgmt, level, uncov)
+        # 周环比（上周）
+        prev_label = _logs_week_offset(week, -1)
+        p_start, p_end = _logs_week_bounds(prev_label)
+        prev_rows = (db.query(DailyLog)
+                     .filter(DailyLog.creator_name == name,
+                             DailyLog.create_time >= p_start, DailyLog.create_time < p_end).all())
+        prev = None
+        if prev_rows:
+            pn = len(prev_rows)
+            p_avg_score = round(sum(l.score_total or 0 for l in prev_rows) / pn, 1)
+            p_text = _logs_text(prev_rows)
+            p_role = evaluate_role_fit(p_text, ROLE_KEYWORDS.get(title, []))
+            p_comp = comprehensive_eval(p_avg_score, p_role["role_fit"],
+                                        evaluate_industry_focus(p_text, _PERF_GROUPS),
+                                        evaluate_industry_focus(p_text, _MGMT_GROUPS),
+                                        p_role["role_hit"], p_role["role_miss"])
+            prev = {"week": prev_label, "log_count": pn, "avg_score": p_avg_score,
+                    "grade": p_comp["grade"], "grade_cn": p_comp["grade_cn"],
+                    "delta": round(avg_score - p_avg_score, 1)}
+        detail = [{"date": l.create_time.strftime("%Y-%m-%d"), "score": l.score_total or 0} for l in rows]
+        radar = [
+            {"dimension": "内容完整度", "score": p_avg["completeness"], "max": 25},
+            {"dimension": data_dim_label(title), "score": p_avg["data"], "max": 20},
+            {"dimension": "结构化程度", "score": p_avg["structure"], "max": 15},
+            {"dimension": "规划性", "score": p_avg["planning"], "max": 20},
+            {"dimension": "复盘深度", "score": p_avg["depth"], "max": 20},
+        ]
+        recent = [{"date": l.create_time.strftime("%Y-%m-%d"), "score": l.score_total or 0,
+                   "strengths": l.strengths or "", "improvements": l.improvements or ""}
+                  for l in rows[-3:]][::-1]
+        return {"name": name, "title": title, "week": week, "total": n,
+                "avg_score": avg_score, "detail": detail, "radar": radar, "recent": recent,
+                "role_fit": role["role_fit"], "role_hit": role["role_hit"],
+                "role_miss": role["role_miss"], "role_detail": role["role_detail"],
+                "perf_focus": perf, "mgmt_focus": mgmt,
+                "grade": comp["grade"], "grade_cn": comp["grade_cn"],
+                "comp_score": comp["comp_score"], "comment": comp["comment"],
+                "strengths_list": items["strengths_list"], "improvements_list": items["improvements_list"],
+                "strengths": profile["strengths"], "improvements": profile["improvements"],
+                "rectify": rectify, "prev_week": prev,
+                "level": level, "level_covered": level_covered, "level_req": level_req}
+
+    return {"week": week, "start": payload["start"], "end": payload["end"],
+            "total_logs": payload["total_logs"], "people": payload["people"]}
+
+
+@app.get("/api/logs-weekly-weeks")
+def logs_weekly_weeks(db: Session = Depends(get_db)):
+    """有日志的周列表（最新在前），供周选择器。"""
+    return {"weeks": _logs_available_weeks(db), "current": _logs_current_week()}
+
+
+@app.get("/api/logs-weekly-trend")
+def logs_weekly_trend(name: str = Query(...), weeks: int = Query(8, ge=2, le=26),
+                      db: Session = Depends(get_db)):
+    """个人近 N 周评分趋势（整改效果跟踪）。"""
+    from manager_list import TITLE_MAP, ROLE_KEYWORDS
+    from log_eval import (evaluate_role_fit, evaluate_industry_focus, comprehensive_eval,
+                          _PERF_GROUPS, _MGMT_GROUPS)
+    cur = _logs_current_week()
+    trend = []
+    for i in range(weeks - 1, -1, -1):
+        wl = _logs_week_offset(cur, -i)
+        start, end = _logs_week_bounds(wl)
+        rows = (db.query(DailyLog)
+                .filter(DailyLog.creator_name == name,
+                        DailyLog.create_time >= start, DailyLog.create_time < end).all())
+        n = len(rows)
+        avg = round(sum(l.score_total or 0 for l in rows) / n, 1) if n else 0
+        grade = ""
+        if n:
+            text = _logs_text(rows)
+            title = TITLE_MAP.get(name, "")
+            role = evaluate_role_fit(text, ROLE_KEYWORDS.get(title, []))
+            comp = comprehensive_eval(avg, role["role_fit"],
+                                      evaluate_industry_focus(text, _PERF_GROUPS),
+                                      evaluate_industry_focus(text, _MGMT_GROUPS),
+                                      role["role_hit"], role["role_miss"])
+            grade = comp["grade"]
+        trend.append({"week": wl, "log_count": n, "avg_score": avg, "grade": grade})
+    return {"name": name, "trend": trend}
+
+
+@app.get("/api/logs-weekly-export")
+def logs_weekly_export(week: str = Query("", description="周标签 YYYY-Www，空=最新周"),
+                       db: Session = Depends(get_db)):
+    """周报 Excel 导出（通晒用）：sheet1 17人通晒汇总 + sheet2 个人周报明细。"""
+    import io
+    from fastapi.responses import Response
+    payload = _logs_weekly_payload(week, db)
+    week = payload["week"]
+    people = payload["people"]
+
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "周报通晒汇总"
+    headers = ["排名", "姓名", "岗位", "职级", "部门", "篇数", "周均分", "评级", "岗位契合", "业绩导向", "团队管理", "核心优点", "需改进", "整改建议", "综合点评"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="4F46E5")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    for p in people:
+        ws.append([
+            p.get("rank") if p.get("log_count") else "—", p["name"], p["title"], p["level"], p["dept"],
+            p["log_count"] or "—", p["avg_score"] or "—",
+            p["grade"] or "—", p["role_fit"], p["perf_focus"], p["mgmt_focus"],
+            p["strengths"], p["improvements"],
+            "；".join(p["rectify"]) if p.get("rectify") else "",
+            p["comment"],
+        ])
+    width_map = [6, 10, 14, 8, 12, 6, 8, 6, 9, 9, 9, 34, 34, 44, 44]
+    for i, wd in enumerate(width_map, 1):
+        ws.column_dimensions[chr(64 + i)].width = wd
+    ws.freeze_panes = "A2"
+
+    ws2 = wb.create_sheet("个人周报明细")
+    ws2.append(["姓名", "岗位", "职级", "部门", "篇数", "周均分", "评级", "完整度/25", "数据/20", "结构/15", "规划/20", "深度/20",
+                "岗位职责覆盖", "业绩导向/20", "团队管理/20", "核心优点", "需改进", "整改建议", "综合点评"])
+    for c in ws2[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="059669")
+    for p in people:
+        hits = "、".join(p.get("role_hit") or []) or "无"
+        ws2.append([p["name"], p["title"], p["level"], p["dept"], p["log_count"] or "—",
+                    p["avg_score"] or "—", p["grade"] or "—",
+                    p.get("avg_completeness", 0), p.get("avg_data", 0), p.get("avg_structure", 0),
+                    p.get("avg_planning", 0), p.get("avg_depth", 0),
+                    hits, p["perf_focus"], p["mgmt_focus"],
+                    p["strengths"], p["improvements"],
+                    "；".join(p.get("rectify") or []), p["comment"]])
+    w2 = [10, 14, 8, 12, 6, 8, 6, 10, 8, 8, 8, 8, 26, 10, 10, 34, 34, 44, 44]
+    for i, wd in enumerate(w2, 1):
+        ws2.column_dimensions[chr(64 + i)].width = wd
+    ws2.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    from urllib.parse import quote
+    fname = f"周报_{week}.xlsx"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=\"weekly_{week}.xlsx\"; filename*=UTF-8''{quote(fname)}"})
+
+
