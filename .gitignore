@@ -23,5 +23,7 @@ dist/
 # 临时文件
 dept_tmp*.json
 *.tmp
+*.log
+backend/generated_reports/
 .DS_Store
 Thumbs.db

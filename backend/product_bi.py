@@ -15,7 +15,8 @@
 通用规则：
 - 负责人/设计人员为空的记录计入部门汇总，不计入成员明细
 - 综合评分 = 两维度达成率/通过率的均值（无数据的维度不计入，全空为 None）
-- 每表拉取 60 秒 TTL 内存缓存（前端 30s 轮询，避免每次请求都打钉钉接口）
+- 每表每日刷新一次并使用 24 小时内存缓存；前端普通查询只读缓存，手动同步时强制刷新
+- 外部接口失败后 5 分钟内进入冷却，避免失败请求形成重试风暴
 - 钉钉接口失败 → source_error 空数据（不返回假数据），与拼多多/淘宝降级策略一致
 """
 import logging
@@ -44,50 +45,95 @@ D_DATE_FIELD = "日期"              # date: 毫秒时间戳
 D_PASS_FIELD = "是否通过"          # singleSelect: 仅 '通过' 算通过
 D_OWNER_FIELD = "设计人员"         # singleSelect
 
-CACHE_TTL = 60.0  # 秒
+CACHE_TTL = 24 * 60 * 60  # 每日刷新一次，单位：秒
+ERROR_COOLDOWN = 5 * 60  # 外部接口失败后的重试冷却，单位：秒
 
-_cache: Dict[str, Any] = {"ts": {}, "records": {}}
+_cache: Dict[str, Any] = {"ts": {}, "records": {}, "errors": {}}
 _cache_lock = threading.Lock()
+_fetch_lock = threading.Lock()
 
-# 主观评价（人工主观项，沿用占位版口径，按用户要求保留）
+# 部门整体雷达维度必须与岗位雷达维度一致：产品负责人一组、设计人员一组。
+# 分组名称使用看板口径，前端会据此渲染两个独立雷达图。
 _SUBJECTIVE = [
-    SubjectiveEval(dimension="人才质量", score=83, comment="团队整体能力扎实，核心骨干突出，产品思维强", trend="up"),
-    SubjectiveEval(dimension="组织活力", score=79, comment="氛围活跃，但需加强跨部门互动", trend="stable"),
-    SubjectiveEval(dimension="创新成长", score=76, comment="有一定创新意识，落地能力待提升", trend="up"),
-    SubjectiveEval(dimension="执行力", score=86, comment="任务响应快，交付质量稳定", trend="up"),
-    SubjectiveEval(dimension="团队协作", score=81, comment="内部配合良好，跨部门需加强", trend="stable"),
+    SubjectiveEval(dimension="新品交付时效", score=83, comment="从立项到上线的全流程节奏稳定，仍可进一步压缩交付周期", trend="up", group="产品团队"),
+    SubjectiveEval(dimension="交付准时率", score=79, comment="项目节点整体可控，需持续提升按期交付能力", trend="stable", group="产品团队"),
+    SubjectiveEval(dimension="跨部门协同效率", score=76, comment="与运营、设计及供应链协作顺畅，信息同步仍需加强", trend="up", group="产品团队"),
+    SubjectiveEval(dimension="新品储备深度", score=86, comment="新品储备和前期准备较充分，可持续支撑后续上线", trend="up", group="产品团队"),
+    SubjectiveEval(dimension="市场趋势响应", score=81, comment="能够关注市场变化并推动需求落地，响应速度持续提升", trend="stable", group="产品团队"),
+    SubjectiveEval(dimension="视觉转化力", score=83, comment="主图与详情页视觉表达清晰，对用户转化有较好支撑", trend="up", group="设计团队"),
+    SubjectiveEval(dimension="视觉创意力", score=79, comment="具备稳定的创意产出能力，差异化表达仍可加强", trend="stable", group="设计团队"),
+    SubjectiveEval(dimension="品牌视觉管理", score=76, comment="品牌视觉资产持续沉淀，多店铺一致性需要进一步提升", trend="up", group="设计团队"),
+    SubjectiveEval(dimension="设计效率与规范", score=86, comment="设计交付节奏稳定，组件化和模板化规范较好", trend="up", group="设计团队"),
+    SubjectiveEval(dimension="部门协同", score=81, comment="与运营、产品和视频团队沟通顺畅，需求响应及时", trend="stable", group="设计团队"),
 ]
 
 
-def _fetch_records(base_id: str, sheet_id: str) -> List[dict]:
-    """拉取指定钉钉多维表全部记录（每表 60s 内存缓存）。"""
+def _fetch_records(base_id: str, sheet_id: str, force: bool = False) -> List[dict]:
+    """拉取指定钉钉多维表全部记录。
+
+    普通查询在 24 小时缓存内直接返回；force=True 仅由手动/定时同步使用。
+    单飞锁保证缓存失效时并发请求不会同时打到钉钉接口。
+    """
+    now = time.time()
     with _cache_lock:
         cached = _cache["records"].get(sheet_id)
-        if cached is not None and time.time() - _cache["ts"].get(sheet_id, 0) < CACHE_TTL:
+        if not force and cached is not None and now - _cache["ts"].get(sheet_id, 0) < CACHE_TTL:
             return cached
+        last_error = _cache["errors"].get(sheet_id)
+        if not force and last_error and now - last_error["ts"] < ERROR_COOLDOWN:
+            raise RuntimeError(f"钉钉多维表暂时进入失败冷却，请稍后再试：{last_error['message']}")
 
-    client = DingTalkBitableClient()
-    client.get_access_token()
-    records: List[dict] = []
-    token: Optional[str] = None
-    while True:
-        body: dict = {"pageSize": 500}
-        if token:
-            body["nextToken"] = token
-        r = client._request("POST", f"/bases/{base_id}/sheets/{sheet_id}/records/list", json=body)
-        if isinstance(r, list):
-            records.extend(r)
-            break
-        records.extend(r.get("records", r.get("value", [])))
-        token = r.get("nextToken")
-        if not r.get("hasMore") or not token:
-            break
-        time.sleep(0.3)
+    with _fetch_lock:
+        # 等待其他请求完成后再次检查缓存，避免重复刷新。
+        now = time.time()
+        with _cache_lock:
+            cached = _cache["records"].get(sheet_id)
+            if not force and cached is not None and now - _cache["ts"].get(sheet_id, 0) < CACHE_TTL:
+                return cached
+            last_error = _cache["errors"].get(sheet_id)
+            if not force and last_error and now - last_error["ts"] < ERROR_COOLDOWN:
+                raise RuntimeError(f"钉钉多维表暂时进入失败冷却，请稍后再试：{last_error['message']}")
 
-    with _cache_lock:
-        _cache["records"][sheet_id] = records
-        _cache["ts"][sheet_id] = time.time()
-    return records
+        try:
+            client = DingTalkBitableClient()
+            client.get_access_token()
+            records: List[dict] = []
+            token: Optional[str] = None
+            while True:
+                body: dict = {"pageSize": 500}
+                if token:
+                    body["nextToken"] = token
+                r = client._request("POST", f"/bases/{base_id}/sheets/{sheet_id}/records/list", json=body)
+                if isinstance(r, list):
+                    records.extend(r)
+                    break
+                records.extend(r.get("records", r.get("value", [])))
+                token = r.get("nextToken")
+                if not r.get("hasMore") or not token:
+                    break
+                time.sleep(0.3)
+        except Exception as exc:  # noqa: BLE001 — 保留旧缓存并进入失败冷却
+            with _cache_lock:
+                _cache["errors"][sheet_id] = {"ts": time.time(), "message": str(exc)}
+            raise
+
+        with _cache_lock:
+            _cache["records"][sheet_id] = records
+            _cache["ts"][sheet_id] = time.time()
+            _cache["errors"].pop(sheet_id, None)
+        return records
+
+
+def refresh_product_cache() -> dict:
+    """强制刷新产品与设计两张钉钉表，供每日任务和手动同步调用。"""
+    product_records = _fetch_records(PRODUCT_BASE, PRODUCT_SHEET, force=True)
+    design_records = _fetch_records(DESIGN_BASE, DESIGN_SHEET, force=True)
+    return {
+        "product_records": len(product_records),
+        "design_records": len(design_records),
+        "record_count": len(product_records) + len(design_records),
+        "refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def _parse_month(val: Any) -> Optional[int]:

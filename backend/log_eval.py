@@ -192,11 +192,14 @@ _DIM_CN = {
 
 def comprehensive_eval(avg_score: float, role_fit: int, perf: int, mgmt: int,
                        role_hit: list, role_miss: list, top_dim: str | None = None,
-                       weak_dim: str | None = None) -> dict:
+                       weak_dim: str | None = None, writing_ref: int = 0) -> dict:
     """综合评级 A/B/C/D + 综合点评（结合岗位职责与电商要求）。
-    综合分 = 0.7×日志质量 + 0.15×岗位契合 + 0.075×业绩导向 + 0.075×团队管理（均折算 100 分制）。
+    综合分 = 0.6×日志质量 + 0.15×岗位契合 + 0.075×业绩导向 +
+    0.075×团队管理 + 0.1×岗位书写维度覆盖（均折算 100 分制）。
+    岗位书写维度覆盖来自管理岗日志书写参考维度.xlsx，按岗位模板逐项命中计分。
     评级：A≥85 优秀 / B≥75 良好 / C≥65 合格 / D<65 待改进。"""
-    comp = 0.7 * avg_score + 0.15 * role_fit * 5 + 0.075 * perf * 5 + 0.075 * mgmt * 5
+    comp = (0.6 * avg_score + 0.15 * role_fit * 5 + 0.075 * perf * 5 +
+            0.075 * mgmt * 5 + 0.1 * writing_ref * 5)
     grade = 'A' if comp >= 85 else 'B' if comp >= 75 else 'C' if comp >= 65 else 'D'
     grade_cn = {'A': '优秀', 'B': '良好', 'C': '合格', 'D': '待改进'}[grade]
 
@@ -213,6 +216,10 @@ def comprehensive_eval(avg_score: float, role_fit: int, perf: int, mgmt: int,
         parts.append("团队管理内容充实")
     elif mgmt < 10:
         parts.append("团队管理板块待加强")
+    if writing_ref >= 15:
+        parts.append("岗位日志书写参考维度覆盖充分")
+    elif writing_ref < 10:
+        parts.append("岗位日志书写参考维度覆盖不足")
     if weak_dim:
         parts.append(f"相对全员，{_DIM_CN.get(weak_dim, weak_dim)}是短板")
     comment = '；'.join(parts[:3]) if parts else '整体良好，保持稳定'
@@ -221,7 +228,8 @@ def comprehensive_eval(avg_score: float, role_fit: int, perf: int, mgmt: int,
 
 
 def build_report_items(avg_score: float, role: dict, perf: int, mgmt: int,
-                       strengths_sum: str, improvements_sum: str) -> dict:
+                       strengths_sum: str, improvements_sum: str,
+                       writing_ref: int | None = None) -> dict:
     """个人分析报告：多条优缺点列表（岗位职责/维度/业绩/团队 四类来源）。"""
     hit, miss = role.get("role_hit") or [], role.get("role_miss") or []
     strengths_list, improvements_list = [], []
@@ -233,6 +241,8 @@ def build_report_items(avg_score: float, role: dict, perf: int, mgmt: int,
         strengths_list.append(f"业绩导向明确，经营成果意识强（{perf}/20）")
     if mgmt >= 15:
         strengths_list.append(f"团队管理内容充实（{mgmt}/20）")
+    if writing_ref is not None and writing_ref >= 15:
+        strengths_list.append(f"岗位日志书写参考维度覆盖充分（{writing_ref}/20）")
     if not strengths_list:
         strengths_list.append("日志按时提交，内容规范")
 
@@ -244,6 +254,8 @@ def build_report_items(avg_score: float, role: dict, perf: int, mgmt: int,
         improvements_list.append(f"业绩数据体现不足（{perf}/20），建议突出经营成果")
     if mgmt < 10:
         improvements_list.append(f"团队管理板块待加强（{mgmt}/20）")
+    if writing_ref is not None and writing_ref < 10:
+        improvements_list.append(f"岗位日志书写参考维度覆盖不足（{writing_ref}/20），建议按岗位模板补齐关键板块")
     if not improvements_list:
         improvements_list.append("整体表现良好，可保持稳定输出")
     return {"strengths_list": strengths_list, "improvements_list": improvements_list}
@@ -251,11 +263,21 @@ def build_report_items(avg_score: float, role: dict, perf: int, mgmt: int,
 
 # ── 周度报告：职级要求覆盖 + 整改建议（2026-08 新增，用于整改与通晒）──
 def evaluate_level_fit(text: str, level_req: list) -> tuple:
-    """职级要求覆盖 → (覆盖数, 未覆盖关键词列表)。结合岗位职级及要求审视日志内容。"""
+    """职级要求覆盖 → (覆盖数, 未覆盖关键词列表)。结合岗位职级及要求审视日志内容。
+
+    匹配规则（2026-08 修正）：全文包含关键词本身、或关键词的前 2 字 / 后 2 字
+    （如「跨部门统筹」命中「统筹」即视为覆盖；「目标拆解」命中「目标」即覆盖）。
+    日报为口语化表达，整词命中率系统性失真（此前全员 0/4），改为核心词匹配。
+    """
     t = _clean(text or "").lower()
     if not level_req:
         return 0, []
-    uncov = [w for w in level_req if w.lower() not in t]
+    uncov = []
+    for w in level_req:
+        wl = w.lower()
+        if wl in t or (len(wl) >= 2 and (wl[:2] in t or wl[-2:] in t)):
+            continue
+        uncov.append(w)
     return len(level_req) - len(uncov), uncov
 
 
@@ -417,6 +439,231 @@ def build_deep_advice(title: str, role_keywords: list, role_hit: list, role_miss
         strs.append(f"日志按时提交，在{title}岗位上保持稳定输出，可进一步向{family}核心指标深化")
 
     return {"deep_strengths": strs, "deep_improvements": imps}
+
+
+# ══════════════════════════════════════════════════════════════════
+# 周度报告三维评估（2026-08 用户口径）：电商行业属性 / 岗位要求 / 日报书写展现
+# 各 20 分制 + 评语；纯增量展示，不改变综合评级公式（0.7质量+0.15契合+0.075业绩+0.075团队）
+# ══════════════════════════════════════════════════════════════════
+
+# ① 电商行业属性：岗位族 → 4 组核心经营指标词族（每组命中 5 分，共 20 分）
+_IND_GROUPS = {
+    "电商运营": [
+        ("销售规模", ["销售额", "gmv", "销量", "订单量", "成交"]),
+        ("投放投产", ["投产", "roi", "花费", "推广", "直通车"]),
+        ("转化流量", ["转化率", "点击率", "流量", "加购", "收藏", "访客"]),
+        ("经营结果", ["业绩", "利润", "目标", "达成", "增长率"]),
+    ],
+    "采购供应": [
+        ("成本控制", ["议价", "降本", "成本", "价格", "询价"]),
+        ("库存周转", ["库存", "周转", "呆滞", "备货", "缺货"]),
+        ("交付保障", ["到货", "交期", "交付", "断货", "发货"]),
+        ("质量管控", ["质检", "不合格", "退货", "索赔", "质量"]),
+    ],
+    "客服": [
+        ("转化成交", ["转化", "成交", "复购", "客单", "下单"]),
+        ("服务响应", ["接待", "会话", "回复", "咨询", "出勤"]),
+        ("售后体验", ["售后", "退款", "客诉", "投诉", "满意度"]),
+        ("质检话术", ["质检", "话术", "录音", "检查", "赔付"]),
+    ],
+    "财务": [
+        ("预算执行", ["预算", "预测", "偏差", "执行"]),
+        ("成本费用", ["成本", "费用", "核算", "分摊"]),
+        ("经营分析", ["毛利", "净利", "利润", "盈亏", "同比"]),
+        ("回款合规", ["回款", "发票", "税务", "佣金", "内控"]),
+    ],
+    "人力行政": [
+        ("招聘交付", ["招聘", "面试", "入职", "到岗", "编制"]),
+        ("绩效薪酬", ["绩效", "考核", "薪酬", "评优", "奖金"]),
+        ("培训发展", ["培训", "培养", "晋升", "带教", "学习"]),
+        ("用工风控", ["离职", "合同", "仲裁", "考勤", "用工"]),
+    ],
+    "产品": [
+        ("产品交付", ["上线", "交付", "打样", "通过", "迭代"]),
+        ("质量管控", ["质检", "合格", "检测", "标准", "抽检"]),
+        ("需求规划", ["需求", "立项", "规划", "新品", "市场"]),
+        ("供应链协同", ["供应商", "工厂", "生产", "交期"]),
+    ],
+    "数据分析": [
+        ("指标体系", ["数据", "指标", "口径", "维度", "报表"]),
+        ("分析洞察", ["分析", "洞察", "趋势", "归因", "波动"]),
+        ("工具建设", ["工具", "自动化", "脚本", "看板", "模板"]),
+        ("落地验证", ["落地", "效果", "验证", "反馈", "跟踪"]),
+    ],
+    "设计": [
+        ("出稿交付", ["出稿", "稿件", "交付", "数量", "进度"]),
+        ("质量通过", ["通过", "返工", "修改", "合格"]),
+        ("需求响应", ["需求", "对接", "排期", "沟通"]),
+        ("效率优化", ["效率", "模板", "批量", "优化"]),
+    ],
+    "商务": [
+        ("渠道拓展", ["客户", "渠道", "达人", "主播", "入驻"]),
+        ("业绩回款", ["业绩", "回款", "成交", "订单", "销售额"]),
+        ("合作管理", ["合同", "佣金", "结算", "账期"]),
+        ("商务推进", ["谈判", "跟进", "对接", "选品"]),
+    ],
+    "配方研发": [
+        ("研发打样", ["打样", "测试", "实验", "小样", "研发"]),
+        ("成本优化", ["成本", "原料", "降本", "替换"]),
+        ("质量安全", ["质检", "安全", "合规", "成分", "检测"]),
+        ("生产放大", ["工艺", "生产", "试产", "投产", "车间"]),
+    ],
+    "综合管理": [
+        ("目标经营", ["目标", "完成率", "业绩", "利润", "指标"]),
+        ("团队人效", ["人效", "团队", "人员", "培训", "梯队"]),
+        ("统筹协调", ["协调", "资源", "跨部门", "会议", "统筹"]),
+        ("复盘改进", ["复盘", "优化", "问题", "改进", "总结"]),
+    ],
+}
+
+# ③ 日报书写展现：重点突出判定词（结论/成果类表述）
+_HIGHLIGHT_WORDS = ("总结", "成果", "重点", "完成", "达成", "输出", "落地", "结果", "成效", "闭环")
+
+
+def evaluate_industry_attrs(text: str, title: str) -> dict:
+    """① 电商行业属性（20 分制）：日志是否贴合岗位族的行业核心经营指标。
+
+    命中 4 组核心指标词族中 N 组 → N×5 分。返回 score/comment/family/hit。
+    """
+    t = _clean(text or "").lower()
+    family = _family_of(title)
+    groups = _IND_GROUPS.get(family, [])
+    if not t or not groups:
+        return {"score": 0, "comment": "本周无日志，无法评估行业属性", "family": family, "hit": []}
+    hit = [g for g, words in groups if any(w.lower() in t for w in words)]
+    score = 5 * len(hit)
+    if score >= 15:
+        comment = f"贴合电商行业经营口径：{family}核心指标（{'、'.join(hit)}）体现充分，工作成果量化清晰，符合以结果论英雄的行业要求"
+    elif score >= 10:
+        comment = f"体现部分{family}经营指标（{'、'.join(hit) if hit else '无'}），建议进一步突出 {_INDICATORS[family]} 等结果数据"
+    else:
+        comment = f"日志偏事务性记录，缺少{family}核心经营指标支撑，建议围绕 {_INDICATORS[family]} 量化呈现经营结果"
+    return {"score": score, "comment": comment, "family": family, "hit": hit}
+
+
+def evaluate_role_requirements(role: dict, title: str, level: str = "",
+                               level_covered: int = 0, level_req: list | None = None) -> dict:
+    """② 岗位要求契合（20 分制）：岗位职责覆盖 70% + 职级要求覆盖 30% 合成。
+
+    role 来自 evaluate_role_fit()（含 role_fit 0-20、role_hit/role_miss）。
+    """
+    role_fit = role.get("role_fit") or 0
+    hit = role.get("role_hit") or []
+    miss = role.get("role_miss") or []
+    req = level_req or []
+    level_score = 20 * level_covered / max(len(req), 1) if req else 20
+    score = round(0.7 * role_fit + 0.3 * level_score)
+    if not hit and not req:
+        score = 0
+    if score >= 15:
+        parts = [f"职责板块（{'、'.join(hit) if hit else '—'}）覆盖到位"]
+        if level and req:
+            parts.append(f"体现「{level}」要求（{level_covered}/{len(req)}）")
+        comment = f"契合「{title}」岗位要求：{'；'.join(parts)}"
+    elif score >= 10:
+        gap = []
+        if miss:
+            gap.append(f"「{'、'.join(miss[:2])}」职责板块待补")
+        if level and level_covered < len(req):
+            gap.append(f"「{level}」要求覆盖不足（{level_covered}/{len(req)}）")
+        comment = f"基本符合「{title}」岗位要求：{'；'.join(gap) if gap else '整体尚可，可再提升'}，建议补齐短板板块"
+    else:
+        comment = f"与「{title}」岗位要求存在差距：{'、'.join(miss[:2]) if miss else '职责内容'}覆盖不足，职级「{level or '—'}」要求未充分体现"
+    return {"score": score, "comment": comment}
+
+
+def evaluate_writing_show(p_avg: dict, text: str, log_count: int, title: str) -> dict:
+    """③ 日报书写展现（20 分制）：结构条理 5 + 重点突出 5 + 信息密度 5 + 语言专业 5。"""
+    t = _clean(text or "")
+    tl = t.lower()
+    family = _family_of(title)
+
+    # 结构条理 5：取五维「结构化程度」折算（15 分制 → 5 分制）
+    st = p_avg.get("structure") or 0
+    structure = 5 if st >= 12 else 4 if st >= 8 else 3 if st >= 4 else 2
+
+    # 重点突出 5：结论/成果类表述词命中数
+    hl = sum(1 for w in _HIGHLIGHT_WORDS if w.lower() in tl)
+    highlight = 5 if hl >= 3 else 4 if hl == 2 else 3 if hl == 1 else 2
+
+    # 信息密度 5：每篇平均字数
+    chars = len(t.replace("\n", "").replace(" ", ""))
+    per = chars / max(log_count, 1)
+    density = 5 if per >= 250 else 4 if per >= 150 else 3 if per >= 80 else 2
+
+    # 语言专业 5：岗位族业务术语去重命中数
+    terms = {w for w in _FAMILY_DATA_WORDS.get(family, ()) if w.lower() in tl}
+    prof = 5 if len(terms) >= 5 else 4 if len(terms) >= 3 else 3 if len(terms) >= 1 else 2
+
+    score = structure + highlight + density + prof
+    if score >= 17:
+        comment = "日报书写规范专业：结构清晰、重点突出、业务术语与数据运用得当，管理者可快速抓取工作脉络"
+    elif score >= 13:
+        comment = "日报书写较规范：条理基本清晰，可在重点提炼与结论表达上更精炼"
+    elif score >= 9:
+        comment = "日报书写一般：偏流水式记录，建议按『完成-数据-问题-计划』分点书写并提炼重点结论"
+    else:
+        comment = "日报书写待改进：内容较零散，建议结构化分点书写、突出成果与结论，避免大段堆砌"
+    return {"score": score, "comment": comment,
+            "items": {"structure": structure, "highlight": highlight,
+                      "density": density, "professional": prof}}
+
+
+def evaluate_writing_reference(text: str, title: str = "", name: str = "") -> dict:
+    """岗位日志书写参考维度覆盖（20 分制）。
+
+    参考模板来自管理岗日志书写参考维度.xlsx；每个岗位模板的维度等权，
+    通过日志全文命中该维度的任一业务关键词判定覆盖，并返回命中证据供看板追溯。
+    """
+    from manager_list import get_log_writing_reference
+
+    template = get_log_writing_reference(name=name, title=title)
+    dimensions = template.get("dimensions") or []
+    t = _clean(text or "")
+    tl = t.lower()
+    detail, hit, miss = [], [], []
+    for dimension, words in dimensions:
+        covered = bool(tl) and any(word.lower() in tl for word in words)
+        item = {"name": dimension, "covered": covered,
+                "evidence": _evidence(t, words) if covered else ""}
+        detail.append(item)
+        (hit if covered else miss).append(dimension)
+    count = len(dimensions)
+    score = round(20 * len(hit) / count) if count else 0
+    if not t:
+        comment = "周期内无日志，无法评估岗位书写参考维度"
+    elif score >= 15:
+        comment = f"已覆盖岗位书写参考维度 {len(hit)}/{count} 项，符合「{template['core']}」的管理要求"
+    elif score >= 10:
+        comment = f"已覆盖岗位书写参考维度 {len(hit)}/{count} 项，建议补充「{'、'.join(miss[:2])}」等板块"
+    else:
+        comment = f"仅覆盖岗位书写参考维度 {len(hit)}/{count} 项，建议按「{template['label']}」模板补齐「{'、'.join(miss[:3])}」"
+    return {
+        "score": score,
+        "max": 20,
+        "template": template["label"],
+        "template_key": template["key"],
+        "core": template["core"],
+        "covered_count": len(hit),
+        "dimension_count": count,
+        "hit": hit,
+        "miss": miss,
+        "detail": detail,
+        "comment": comment,
+    }
+
+
+def weekly_assessment(title: str, full_text: str, p_avg: dict, role: dict,
+                      level: str = "", level_covered: int = 0,
+                      level_req: list | None = None, log_count: int = 0,
+                      name: str = "") -> dict:
+    """周度四维评估组装：电商行业属性 / 岗位要求 / 参考维度覆盖 / 日报书写展现。"""
+    return {
+        "industry": evaluate_industry_attrs(full_text, title),
+        "role": evaluate_role_requirements(role, title, level, level_covered, level_req),
+        "writing_reference": evaluate_writing_reference(full_text, title, name),
+        "writing": evaluate_writing_show(p_avg, full_text, log_count, title),
+    }
 
 
 def _clean(s: str) -> str:

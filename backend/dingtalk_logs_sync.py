@@ -97,7 +97,7 @@ def fetch_logs(days: int = MAX_DAYS, template: str | None = None) -> list[dict]:
 def _row_to_log(x: dict) -> dict:
     """原始钉钉日志 → 入库字典（清洗+评分）。
 
-    「数据支撑度」按岗位族口径评分：先查 17 人名单岗位（TITLE_MAP），
+    「数据支撑度」按岗位族口径评分：先查管理人员名单岗位（TITLE_MAP），
     名单外查花名册 Employee.position，查不到用通用词表。
     """
     contents = x.get("contents") or []
@@ -119,7 +119,7 @@ _TITLE_CACHE: dict = {}
 
 
 def _title_for(name: str) -> str:
-    """查询日志创建人岗位（17 人名单 → 花名册 → 空）。"""
+    """查询日志创建人岗位（管理人员名单 → 花名册 → 空）。"""
     if name in _TITLE_CACHE:
         return _TITLE_CACHE[name]
     title = ""

@@ -9,9 +9,17 @@
         </select>
         <span v-if="weekly.start" class="range-tip">{{ weekly.start }} ~ {{ weekly.end }}</span>
       </div>
-      <button class="export-btn" @click="exportWeekly" :disabled="!weekly.people?.length">
-        📥 导出 Excel（通晒）
-      </button>
+      <div class="toolbar-actions">
+        <button class="export-btn" @click="exportWeekly" :disabled="!weekly.people?.length">
+          📥 导出 Excel（通晒）
+        </button>
+        <button class="ranking-image-btn" @click="downloadRankingBoard" :disabled="!weekly.people?.length || rankingDownloading">
+          {{ rankingDownloading ? '⏳ 正在生成…' : '🖼️ 下载排名看板（PNG）' }}
+        </button>
+        <button class="batch-image-btn" @click="downloadAllReports" :disabled="!weekly.people?.length || batchDownloading">
+          {{ batchDownloading ? '⏳ 正在打包…' : '🗂️ 批量下载图片（ZIP）' }}
+        </button>
+      </div>
     </div>
 
     <div v-if="loading" class="loading-tip"><span class="spinner"></span> 周报加载中，请稍候…</div>
@@ -34,7 +42,7 @@
           <thead>
             <tr>
               <th>排名</th><th>姓名</th><th>岗位</th><th>职级</th><th>部门</th><th>篇数</th>
-              <th>周均分</th><th>评级</th><th>核心优点</th><th>需改进</th><th>整改建议</th>
+            <th>周均分</th><th>评级</th><th>行业属性</th><th>岗位要求</th><th>岗位书写维度</th><th>书写展现</th><th>核心优点</th><th>需改进</th><th>整改建议</th><th>周报图片</th>
             </tr>
           </thead>
           <tbody>
@@ -49,9 +57,14 @@
               <td>{{ p.log_count }}</td>
               <td class="score-cell"><b>{{ p.avg_score || '—' }}</b></td>
               <td><span class="grade-badge" :class="'g' + p.grade">{{ p.grade_cn || '—' }}</span></td>
+              <td><span v-if="aScore(p, 'industry') !== null" class="assess-chip" :class="assessCls(aScore(p, 'industry'))" :title="aCmt(p, 'industry')">{{ aScore(p, 'industry') }}</span><span v-else class="assess-na">—</span></td>
+              <td><span v-if="aScore(p, 'role') !== null" class="assess-chip" :class="assessCls(aScore(p, 'role'))" :title="aCmt(p, 'role')">{{ aScore(p, 'role') }}</span><span v-else class="assess-na">—</span></td>
+              <td><span v-if="aScore(p, 'writing_reference') !== null" class="assess-chip" :class="assessCls(aScore(p, 'writing_reference'))" :title="aCmt(p, 'writing_reference')">{{ aScore(p, 'writing_reference') }}</span><span v-else class="assess-na">—</span></td>
+              <td><span v-if="aScore(p, 'writing') !== null" class="assess-chip" :class="assessCls(aScore(p, 'writing'))" :title="aCmt(p, 'writing')">{{ aScore(p, 'writing') }}</span><span v-else class="assess-na">—</span></td>
               <td class="tip-cell good">{{ p.strengths }}</td>
               <td class="tip-cell warn">{{ p.improvements }}</td>
               <td class="tip-cell rect">{{ (p.rectify || []).join('；') }}</td>
+              <td class="image-report-cell"><button class="image-report-btn" @click.stop="downloadPersonReport(p.name)">📷 下载</button></td>
             </tr>
           </tbody>
         </table>
@@ -72,7 +85,10 @@
               <span v-else class="week-delta">上周无日志可环比</span>
             </span>
           </span>
-          <button class="drawer-close" @click="closeDrawer" title="关闭">✕</button>
+          <div class="drawer-actions">
+            <button v-if="person" class="image-report-btn" @click="downloadPersonReport(person.name)">📷 下载图片报告</button>
+            <button class="drawer-close" @click="closeDrawer" title="关闭">✕</button>
+          </div>
         </div>
         <div class="drawer-body">
           <div v-if="person && person.total > 0">
@@ -97,6 +113,27 @@
           <div class="focus-item"><span class="focus-label">岗位职责契合</span><span class="focus-val">{{ person.role_fit }}/20</span></div>
           <div class="focus-item"><span class="focus-label">业绩导向</span><span class="focus-val">{{ person.perf_focus }}/20</span></div>
           <div class="focus-item"><span class="focus-label">团队管理</span><span class="focus-val">{{ person.mgmt_focus }}/20</span></div>
+        </div>
+
+        <!-- 四维评估：电商行业属性 / 岗位要求 / 岗位书写参考维度 / 日报书写展现 -->
+        <div class="assess-grid">
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">🏭 电商行业属性</span><span class="assess-score" :class="assessCls(person.assess?.industry?.score)">{{ person.assess?.industry?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ person.assess?.industry?.comment || '本周无日志，无法评估行业属性' }}</div>
+          </div>
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">👤 岗位要求契合</span><span class="assess-score" :class="assessCls(person.assess?.role?.score)">{{ person.assess?.role?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ person.assess?.role?.comment || '本周无日志，无法评估岗位要求' }}</div>
+          </div>
+          <div class="assess-item writing-ref-assess">
+            <div class="assess-head"><span class="assess-name">🧭 岗位书写维度</span><span class="assess-score" :class="assessCls(person.assess?.writing_reference?.score)">{{ person.assess?.writing_reference?.score ?? 0 }}/20</span></div>
+            <div class="assess-template">{{ person.assess?.writing_reference?.template || '管理岗参考模板' }}</div>
+            <div class="assess-cmt">{{ person.assess?.writing_reference?.comment || '本周无日志，无法评估岗位书写维度' }}</div>
+          </div>
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">✍️ 日报书写展现</span><span class="assess-score" :class="assessCls(person.assess?.writing?.score)">{{ person.assess?.writing?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ person.assess?.writing?.comment || '本周无日志，无法评估书写展现' }}</div>
+          </div>
         </div>
 
         <div class="detail-grid">
@@ -139,24 +176,6 @@
           <div class="comment-label">📋 综合评估意见</div>
           <div class="comment-text">{{ person.comment }}</div>
         </div>
-
-        <div class="detail-grid">
-          <div class="panel">
-            <div class="panel-title">本周每日得分</div>
-            <div ref="trendEl" class="chart-box"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-title">最近日志点评</div>
-            <div v-for="r in person.recent" :key="r.date" class="recent-item">
-              <div class="recent-head">
-                <span class="recent-date">{{ r.date }}</span>
-                <span class="recent-score" :class="scoreCls(r.score)">{{ r.score }}分</span>
-              </div>
-              <div class="recent-tip good">👍 {{ r.strengths }}</div>
-              <div class="recent-tip warn">💡 {{ r.improvements }}</div>
-            </div>
-          </div>
-        </div>
           </div>
           <div v-else-if="person" class="no-log-tip">
             {{ person.name }}（{{ person.title }}）本周暂无日志记录
@@ -173,7 +192,6 @@ import axios from 'axios'
 import * as echarts from 'echarts'
 
 const INDIGO = '#4f46e5'
-const GREEN = '#059669'
 
 const weeks = ref([])
 const week = ref('')
@@ -182,10 +200,10 @@ const loading = ref(false)
 const selected = ref('')
 const person = ref(null)
 const drawerOpen = ref(false)
+const rankingDownloading = ref(false)
+const batchDownloading = ref(false)
 const radarEl = ref(null)
-const trendEl = ref(null)
 let radarChart = null
-let trendChart = null
 
 const weekLabel = (w) => (w || '').replace('-W', '年第') + '周'
 const submitCount = computed(() => (weekly.value.people || []).filter(p => p.log_count > 0).length)
@@ -256,7 +274,6 @@ function selectPerson(name) {
 function closeDrawer() {
   drawerOpen.value = false
   radarChart?.dispose(); radarChart = null
-  trendChart?.dispose(); trendChart = null
 }
 
 function exportWeekly() {
@@ -265,10 +282,71 @@ function exportWeekly() {
   a.click()
 }
 
-function scoreCls(s) { return s >= 85 ? 'high' : s >= 70 ? 'mid' : 'low' }
+function downloadPersonReport(name) {
+  if (!name || !week.value) return
+  const a = document.createElement('a')
+  a.href = `/api/logs-weekly-person-image?week=${encodeURIComponent(week.value)}&name=${encodeURIComponent(name)}`
+  a.download = `${name}_${week.value}_周度日志评分报告.png`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+async function downloadRankingBoard() {
+  if (!week.value || !weekly.value.people?.length || rankingDownloading.value) return
+  rankingDownloading.value = true
+  try {
+    const res = await axios.get('/api/logs-weekly-ranking-image', {
+      params: { week: week.value },
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(res.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${week.value}_管理人员周度评分排名看板.png`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('下载周度排名看板失败', e)
+    window.alert('下载排名看板失败，请稍后重试')
+  } finally {
+    rankingDownloading.value = false
+  }
+}
+
+async function downloadAllReports() {
+  if (!week.value || !weekly.value.people?.length || batchDownloading.value) return
+  batchDownloading.value = true
+  try {
+    const res = await axios.get('/api/logs-weekly-person-images-zip', {
+      params: { week: week.value },
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(res.data)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${week.value}_管理人员周度日志评分报告.zip`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('批量下载周报图片失败', e)
+    window.alert('批量下载失败，请稍后重试')
+  } finally {
+    batchDownloading.value = false
+  }
+}
+
+// 三维评估辅助：aScore 返回分数(无日志→null)，aCmt 返回评语，assessCls 返回配色档位
+const aScore = (p, key) => (p.log_count && p.assess?.[key]) ? p.assess[key].score : null
+const aCmt = (p, key) => (p.assess?.[key])?.comment || ''
+function assessCls(s) { return s == null ? '' : s >= 15 ? 'hi' : s >= 10 ? 'mid' : 'lo' }
 
 function renderCharts() {
-  if (!person.value || !radarEl.value || !trendEl.value) return
+  if (!person.value || !radarEl.value) return
   const rd = person.value.radar || []
   radarChart = radarChart || echarts.init(radarEl.value)
   radarChart.setOption({
@@ -287,26 +365,10 @@ function renderCharts() {
       itemStyle: { color: INDIGO },
     }],
   })
-
-  const detail = person.value.detail || []
-  trendChart = trendChart || echarts.init(trendEl.value)
-  trendChart.setOption({
-    tooltip: { trigger: 'axis' },
-    grid: { left: 40, right: 16, top: 20, bottom: 30 },
-    xAxis: { type: 'category', data: detail.map(d => d.date), axisLabel: { rotate: 45 } },
-    yAxis: { type: 'value', min: 0, max: 100 },
-    series: [{
-      type: 'line', data: detail.map(d => d.score), smooth: true,
-      lineStyle: { color: GREEN, width: 2 },
-      itemStyle: { color: GREEN },
-      areaStyle: { color: 'rgba(5, 150, 105, 0.15)' },
-    }],
-  })
 }
 
 function onResize() {
   radarChart?.resize()
-  trendChart?.resize()
 }
 
 onMounted(async () => {
@@ -318,7 +380,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   radarChart?.dispose()
-  trendChart?.dispose()
 })
 </script>
 
@@ -326,6 +387,7 @@ onBeforeUnmount(() => {
 .weekly-report { padding: 4px 0; }
 .weekly-toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
 .week-picker { display: flex; align-items: center; gap: 10px; }
+.toolbar-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .picker-label { font-size: 14px; font-weight: 600; color: #1a1a2e; }
 .week-select { padding: 7px 12px; border: 1px solid #e5e7eb; border-radius: 8px; font-size: 13px; background: #fff; color: #1a1a2e; outline: none; cursor: pointer; }
 .week-select:focus { border-color: #4f46e5; }
@@ -333,6 +395,15 @@ onBeforeUnmount(() => {
 .export-btn { background: #059669; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
 .export-btn:hover:not(:disabled) { background: #047857; }
 .export-btn:disabled { opacity: .5; cursor: not-allowed; }
+.batch-image-btn { background: #4f46e5; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.batch-image-btn:hover:not(:disabled) { background: #4338ca; }
+.batch-image-btn:disabled { opacity: .6; cursor: not-allowed; }
+.ranking-image-btn { background: #0f766e; color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+.ranking-image-btn:hover:not(:disabled) { background: #115e59; }
+.ranking-image-btn:disabled { opacity: .6; cursor: not-allowed; }
+.image-report-cell { text-align: center; }
+.image-report-btn { border: none; border-radius: 7px; padding: 5px 9px; background: #eef2ff; color: #3730a3; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.image-report-btn:hover { background: #e0e7ff; color: #312e81; }
 
 .stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
 .stat-card { background: #fff; border-radius: 12px; padding: 18px; text-align: center; box-shadow: 0 1px 4px rgba(0,0,0,.05); }
@@ -390,6 +461,23 @@ onBeforeUnmount(() => {
 .focus-label { font-size: 13px; color: #6b7280; }
 .focus-val { font-size: 18px; font-weight: 700; color: #4f46e5; }
 
+/* 四维评估（电商行业属性 / 岗位要求 / 岗位书写参考维度 / 日报书写展现） */
+.assess-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.assess-item { background: #fff; border-radius: 10px; padding: 12px 14px; border: 1px solid #f3f4f6; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.assess-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }
+.assess-name { font-size: 13px; font-weight: 700; color: #1a1a2e; white-space: nowrap; }
+.assess-score { font-size: 16px; font-weight: 700; }
+.assess-score.hi { color: #047857; }
+.assess-score.mid { color: #3730a3; }
+.assess-score.lo { color: #b91c1c; }
+.assess-cmt { font-size: 12px; color: #4b5563; line-height: 1.55; }
+.assess-template { font-size: 11px; color: #7c3aed; margin: -2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.assess-chip { display: inline-block; min-width: 28px; text-align: center; padding: 2px 6px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+.assess-chip.hi { background: #ecfdf5; color: #047857; }
+.assess-chip.mid { background: #eef2ff; color: #3730a3; }
+.assess-chip.lo { background: #fef2f2; color: #b91c1c; }
+.assess-na { color: #d1d5db; }
+
 .role-table { display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow-y: auto; }
 .role-row { border: 1px solid #f3f4f6; border-radius: 8px; padding: 8px 12px; background: #fafafa; }
 .role-name { font-size: 13px; font-weight: 600; color: #1a1a2e; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
@@ -419,16 +507,6 @@ onBeforeUnmount(() => {
 .panel-title { font-size: 14px; font-weight: 600; color: #1a1a2e; margin-bottom: 10px; }
 .chart-box { height: 300px; }
 
-.recent-item { padding: 8px 0; border-bottom: 1px dashed #f3f4f6; font-size: 13px; }
-.recent-item:last-child { border-bottom: none; }
-.recent-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
-.recent-date { font-weight: 600; color: #1a1a2e; }
-.recent-score { font-weight: 700; }
-.recent-score.high { color: #059669; }
-.recent-score.mid { color: #4f46e5; }
-.recent-score.low { color: #dc2626; }
-.recent-tip { line-height: 1.5; }
-
 .loading-tip { text-align: center; padding: 60px 0; color: #8b8fa8; font-size: 14px; }
 .no-log-tip { background: #fffbeb; border: 1px solid #fde68a; color: #92400e; padding: 16px; border-radius: 10px; text-align: center; font-size: 14px; }
 .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid #c7d2fe; border-top-color: #4f46e5; border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -3px; margin-right: 8px; }
@@ -439,6 +517,7 @@ onBeforeUnmount(() => {
 .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: 720px; max-width: 94vw; background: #f0f2f5; z-index: 301; box-shadow: -6px 0 28px rgba(0,0,0,.16); transform: translateX(100%); transition: transform .28s ease; display: flex; flex-direction: column; }
 .drawer.open { transform: translateX(0); }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 20px; background: #fff; border-bottom: 1px solid #e8e8e8; position: sticky; top: 0; z-index: 2; }
+.drawer-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .drawer-title { font-size: 15px; font-weight: 700; color: #1a1a2e; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .drawer-close { border: none; background: #f3f4f6; color: #4b5563; width: 32px; height: 32px; border-radius: 50%; font-size: 14px; cursor: pointer; flex-shrink: 0; transition: all .2s; }
 .drawer-close:hover { background: #fee2e2; color: #dc2626; }

@@ -67,6 +67,34 @@ async function syncDingTalk() {
       msg += `\n⚠️ 招聘数据同步失败: ${detail}`
     }
 
+    // 3. 强制刷新在岗时长缓存（页面普通查询只读取每日缓存）
+    try {
+      const dutyRes = await axios.post('/api/sync-onduty', {}, { timeout: 120000 })
+      const dutyData = dutyRes.data
+      if (dutyData.sync?.ok) {
+        msg += `\n✅ 在岗时长同步成功: ${dutyData.sync.record_count || 0} 条记录`
+      } else {
+        msg += `\n⚠️ 在岗时长同步: ${dutyData.source_error || '同步失败'}`
+      }
+    } catch (dutyErr) {
+      const detail = dutyErr.response?.data?.detail || dutyErr.message
+      msg += `\n⚠️ 在岗时长同步失败: ${detail}`
+    }
+
+    // 4. 强制刷新产品/设计人效缓存（页面普通查询只读取每日缓存）
+    try {
+      const effRes = await axios.post('/api/sync-dept-efficiency', {}, { timeout: 120000 })
+      const effData = effRes.data
+      if (effData.sync?.ok) {
+        msg += `\n✅ 部门人效同步成功: 产品 ${effData.sync.product_records || 0} 条、设计 ${effData.sync.design_records || 0} 条`
+      } else {
+        msg += `\n⚠️ 部门人效同步: ${effData.sync?.message || '同步失败'}`
+      }
+    } catch (effErr) {
+      const detail = effErr.response?.data?.detail || effErr.message
+      msg += `\n⚠️ 部门人效同步失败: ${detail}`
+    }
+
     alert(msg)
     // 刷新当前页面
     window.location.reload()

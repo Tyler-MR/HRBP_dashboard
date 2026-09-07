@@ -87,8 +87,8 @@ class MemberScore(Base):
     id = Column(Integer, primary_key=True, index=True)
     department = Column(String(100), nullable=False, comment="部门")
     member_name = Column(String(50), nullable=False, comment="成员姓名")
-    dimension = Column(String(30), nullable=False, comment="评估维度: 电商=数据驱动与选品力/店群品效管理/渠道拓展与策略贡献/运营人效/抗压与执行; 采购=谈判议价/交付保障/库存管理/供应商开发/跨部门协同; 客服=销售转化/售后处理/响应效率/用户洞察/情绪韧性; 人力行政部招聘组=业务理解/招聘交付力/人才配置与储备/制度流程与用工风控/服务意识与协同; 人力行政部行政组=业务理解/行政后勤管理/制度流程建设/成本管控/服务意识与协同; 产品=人才质量/组织活力/创新成长/执行力/团队协作; 其他=财务产出/运营效率/人才质量/执行力/创新成长")
-    score = Column(Integer, nullable=False, default=0, comment="评分 0-100")
+    dimension = Column(String(30), nullable=False, comment="评估维度: 电商=数据驱动与选品力/店群品效管理/渠道拓展与策略贡献/运营人效/抗压与执行; 采购=成本优化/订单履约/库存管理/供应商管理/部门协同（赵艺乐首项为数据信息管理）; 客服=销售转化/售后处理/响应效率/用户洞察/情绪韧性; 人力行政部招聘组=业务理解/招聘交付力/人才配置与储备/制度流程与用工风控/服务意识与协同; 人力行政部行政组=业务理解/行政后勤管理/制度流程建设/成本管控/服务意识与协同; 产品=人才质量/组织活力/创新成长/执行力/团队协作; 其他=财务产出/运营效率/人才质量/执行力/创新成长")
+    score = Column(Integer, nullable=False, default=0, comment="单维评分 0-20；五维合计上限100")
     updated_at = Column(String(30), comment="更新时间 YYYY-MM-DD HH:MM:SS")
 
     __table_args__ = (

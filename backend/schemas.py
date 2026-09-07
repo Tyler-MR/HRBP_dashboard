@@ -241,14 +241,113 @@ class DeptMember(BaseModel):
     name: str
     position: str
     score: float = 0.0                 # 个人综合评分（已评分为当前维度 5 维合计，未评分=数据源原始分）
-    score_max: float = 100.0           # 评分满分（已评分=单维满分×5：10分制=50/100分制=500；未评分=100 百分制）
+    score_max: float = 100.0           # 成员五维合计满分100
     metrics: List[MemberMetric] = []
     evaluation: str = ""               # 部门负责人评语
+    manager_evaluation: str = ""        # 主管人员评价（与花名册/系统信息分开保存）
+
+
+class PddProductPeriod(BaseModel):
+    month: str
+    product_count: int = 0
+    b_count: int = 0
+    b_rate: float = 0.0                 # B款链接数 / 产品数（百分比）
+    a_count: int = 0
+    a_rate: float = 0.0                 # A款链接数 / 产品数（百分比）
+    success_rate: float = 0.0           # 综合打品成功率 = A款60% + B款40%
+
+
+class PddProductOwner(BaseModel):
+    name: str
+    product_count: int = 0
+    b_count: int = 0
+    b_rate: float = 0.0
+    a_count: int = 0
+    a_rate: float = 0.0
+    success_score: float = 0.0             # A/B 打品质量分，A 60% + B 40%
+    performance_score: float = 0.0        # 销售额指数，相对团队最高销售额
+    combined_score: float = 0.0            # 综合分，打品质量与销售业绩各50%
+    performance_available: bool = False
+    sales_revenue: float = 0.0             # 万元
+    profit: float = 0.0                    # 万元
+    profit_margin: float = 0.0             # 百分比
+    roi: float = 0.0
+    stores: int = 0
+    rank: int = 0
+    product_data_available: bool = False   # 当期是否有钉钉打品记录
+
+
+class PddProductReport(BaseModel):
+    headline: str = ""
+    conclusion: str = ""
+    highlights: List[str] = []
+    actions: List[str] = []
+
+
+class PddSupervisorBrief(BaseModel):
+    """主管另行提供的阶段性经营判断，与系统分析分开标记。"""
+    period: str = ""
+    source: str = "supervisor_provided"
+    overall: str = ""
+    people: List[str] = []
+    focus: List[str] = []
+    ai_comparison: List[str] = []
+
+
+class PddSupervisorAnalysis(BaseModel):
+    """拼多多主管日报原文与看板量化分析的可追溯对照。"""
+    name: str = "朱康"
+    title: str = "拼多多主管"
+    period: str = ""
+    source: str = "management_logs"
+    status: str = "no_data"              # available/no_data/source_error
+    log_count: int = 0
+    raw_text: str = ""
+    covered_dimensions: List[str] = []
+    missing_dimensions: List[str] = []
+    evidence: List[str] = []
+    supervisor_brief: Optional[PddSupervisorBrief] = None
+    supervisor_focus: List[str] = []
+    ai_focus: List[str] = []
+    consensus: List[str] = []
+    supervisor_only: List[str] = []
+    ai_only: List[str] = []
+    differences: List[str] = []
+    conclusion: str = ""
+    source_error: Optional[str] = None
+
+
+class PddProductAnalysis(BaseModel):
+    """拼多多打品成功率分析（来源：钉钉多维表「拼多多打品成功率」）。"""
+    period: str = ""
+    product_count: int = 0
+    b_count: int = 0
+    b_rate: float = 0.0
+    a_count: int = 0
+    a_rate: float = 0.0
+    success_rate: float = 0.0               # 团队综合打品成功率 = A款60% + B款40%
+    trend_delta: Optional[float] = None     # 综合成功率较上一有效月份的百分点变化
+    trend_label: str = ""
+    trend: List[PddProductPeriod] = []
+    owners: List[PddProductOwner] = []
+    team_size: int = 0
+    team_sales_revenue: float = 0.0         # 万元
+    team_profit: float = 0.0                # 万元
+    team_profit_margin: float = 0.0         # 百分比
+    team_roi: float = 0.0
+    team_person_efficiency: float = 0.0     # 万元/人
+    ranking_basis: str = "综合排名 = 打品质量分50% + 月销售额指数50%"
+    report: Optional[PddProductReport] = None
+    supervisor_analysis: Optional[PddSupervisorAnalysis] = None
+    source: str = "dingtalk"
+    source_sheet: str = "拼多多打品成功率"
+    last_synced_at: str = ""
+    source_error: Optional[str] = None
 
 
 class SubjectiveEval(BaseModel):
     dimension: str                     # 评价维度
-    score: float                       # 0-100
+    score: float                       # 雷达单维 0-20
     comment: str = ""
     trend: str = "stable"
     group: str = ""                    # 维度分组（如人力行政部=招聘组/行政组），无分组为空
@@ -261,6 +360,7 @@ class DeptEfficiency(BaseModel):
     score: Optional[float] = None
     members: List[DeptMember] = []
     subjective: List[SubjectiveEval] = []
+    pdd_product_analysis: Optional[PddProductAnalysis] = None
     source: Optional[str] = None          # 数据源标识: "mysql"=淘宝BI实时数据
     source_error: Optional[str] = None    # 数据源异常提示（如 MySQL 连接失败已重试）
 
@@ -273,14 +373,14 @@ class DeptEfficiencyResponse(BaseModel):
 # ========== 成员个人人才雷达图（每人一个打分入口） ==========
 class RadarDimInfo(BaseModel):
     dimension: str                          # 维度名
-    max: int = 100                          # 满分（电商团队=10，其余=100）
+    max: int = 20                           # 单维满分（五维合计上限100）
     standard: str = ""                      # 该维度评分标准说明
 
 
 class MemberScoreItem(BaseModel):
     name: str                                  # 成员姓名
     position: str = ""                         # 岗位
-    scores: Dict[str, Optional[int]] = {}      # 维度 -> 分数（电商团队 0-10，其余 0-100；None=未评分）
+    scores: Dict[str, Optional[int]] = {}      # 维度 -> 分数（统一 0-20；None=未评分）
     updated_at: str = ""                       # 最近评分时间
 
 
@@ -293,7 +393,7 @@ class MemberRadarResponse(BaseModel):
 class MemberScoreSave(BaseModel):
     department: str                            # 部门
     member: str                                # 成员姓名
-    scores: Dict[str, int]                     # 维度 -> 分数（10分制部门 0-10，其余 0-100）
+    scores: Dict[str, int]                     # 维度 -> 分数（统一 0-20，五维合计上限100）
     position: str = ""                         # 成员岗位（产品团队区分 产品负责人/设计人员）
 
 

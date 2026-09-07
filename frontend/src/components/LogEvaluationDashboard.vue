@@ -16,6 +16,17 @@
       </div>
       <span class="update-time"><i class="ic ic-clock"></i> {{ updatedAt }}</span>
       <button class="refresh-btn" @click="refresh" title="刷新"><i class="ic ic-refresh"></i></button>
+      <div v-if="viewMode === 'period'" class="download-actions">
+        <button class="period-download-btn excel" :disabled="downloadBusy" @click="downloadComprehensive('excel')">
+          {{ periodDownloading === 'excel' ? '导出中…' : '导出 Excel' }}
+        </button>
+        <button class="period-download-btn ranking" :disabled="downloadBusy" @click="downloadComprehensive('ranking')">
+          {{ periodDownloading === 'ranking' ? '生成中…' : '下载排名看板' }}
+        </button>
+        <button class="period-download-btn batch" :disabled="downloadBusy || !ranking.people?.length" @click="downloadComprehensive('batch')">
+          {{ periodDownloading === 'batch' ? '打包中…' : '批量下载图片' }}
+        </button>
+      </div>
     </header>
 
     <!-- 同步入口 -->
@@ -46,7 +57,7 @@
           <thead>
             <tr>
               <th>排名</th><th>姓名</th><th>岗位</th><th>篇数</th><th>平均分</th><th>评级</th>
-              <th>优点</th><th>需改进方向</th><th>综合点评</th>
+              <th>岗位书写维度</th><th>优点</th><th>需改进方向</th><th>综合点评</th><th>报告图片</th>
             </tr>
           </thead>
           <tbody>
@@ -59,9 +70,15 @@
               <td>{{ p.log_count }}</td>
               <td class="score-cell"><b>{{ p.avg_score || '—' }}</b></td>
               <td><span class="grade-badge" :class="'g' + p.grade">{{ p.grade_cn || '—' }}</span></td>
+              <td><span v-if="writingRefScore(p) !== null" class="assess-chip" :class="assessCls(writingRefScore(p))" :title="p.writing_reference?.comment || ''">{{ writingRefScore(p) }}</span><span v-else class="assess-na">—</span></td>
               <td class="tip-cell good">{{ p.strengths }}</td>
               <td class="tip-cell warn">{{ p.improvements }}</td>
               <td class="tip-cell cmt">{{ p.comment }}</td>
+              <td class="image-report-cell">
+                <button class="image-report-btn" :disabled="downloadBusy" @click.stop="downloadComprehensive('person', p.name)">
+                  {{ periodDownloading === `person:${p.name}` ? '生成中…' : '下载图片' }}
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -86,12 +103,52 @@
           <div class="focus-item"><span class="focus-label">岗位职责契合</span><span class="focus-val">{{ evalData.role_fit }}/20</span></div>
           <div class="focus-item"><span class="focus-label">业绩导向</span><span class="focus-val">{{ evalData.perf_focus }}/20</span></div>
           <div class="focus-item"><span class="focus-label">团队管理</span><span class="focus-val">{{ evalData.mgmt_focus }}/20</span></div>
+          <div class="focus-item"><span class="focus-label">岗位书写维度</span><span class="focus-val">{{ evalData.writing_reference?.score ?? 0 }}/20</span></div>
         </div>
 
         <!-- 五维雷达（全宽） -->
         <div class="panel radar-panel">
           <div class="panel-title">评分维度（五维雷达）</div>
           <div ref="radarEl" class="chart-box"></div>
+        </div>
+
+        <!-- 综合评估与周度评估共用四项评估维度 -->
+        <div v-if="evalData.assess" class="assess-grid">
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">🏭 电商行业属性</span><span class="assess-score" :class="assessCls(evalData.assess.industry?.score)">{{ evalData.assess.industry?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ evalData.assess.industry?.comment || '周期内无日志，无法评估行业属性' }}</div>
+          </div>
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">👤 岗位要求契合</span><span class="assess-score" :class="assessCls(evalData.assess.role?.score)">{{ evalData.assess.role?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ evalData.assess.role?.comment || '周期内无日志，无法评估岗位要求' }}</div>
+          </div>
+          <div class="assess-item writing-ref-assess">
+            <div class="assess-head"><span class="assess-name">🧭 岗位书写维度</span><span class="assess-score" :class="assessCls(evalData.assess.writing_reference?.score)">{{ evalData.assess.writing_reference?.score ?? 0 }}/20</span></div>
+            <div class="assess-template">{{ evalData.assess.writing_reference?.template || '管理岗参考模板' }}</div>
+            <div class="assess-cmt">{{ evalData.assess.writing_reference?.comment || '周期内无日志，无法评估岗位书写维度' }}</div>
+          </div>
+          <div class="assess-item">
+            <div class="assess-head"><span class="assess-name">✍️ 日报书写展现</span><span class="assess-score" :class="assessCls(evalData.assess.writing?.score)">{{ evalData.assess.writing?.score ?? 0 }}/20</span></div>
+            <div class="assess-cmt">{{ evalData.assess.writing?.comment || '周期内无日志，无法评估书写展现' }}</div>
+          </div>
+        </div>
+
+        <!-- 管理岗日志书写参考维度：按岗位模板逐项覆盖并保留日志证据 -->
+        <div v-if="evalData.writing_reference" class="writing-reference-panel">
+          <div class="writing-reference-head">
+            <div>
+              <div class="panel-title">管理岗日志书写参考维度（{{ evalData.writing_reference.template }}）</div>
+              <div class="writing-reference-core">核心要求：{{ evalData.writing_reference.core }}</div>
+            </div>
+            <span class="writing-reference-score" :class="assessCls(evalData.writing_reference.score)">{{ evalData.writing_reference.score }}/20</span>
+          </div>
+          <div class="writing-reference-grid">
+            <div v-for="d in evalData.writing_reference.detail" :key="d.name" class="writing-reference-item" :class="d.covered ? 'covered' : 'missing'">
+              <div class="writing-reference-name"><span class="role-dot" :class="d.covered ? 'ok' : 'no'">{{ d.covered ? '✓' : '✗' }}</span>{{ d.name }}</div>
+              <div class="role-evidence" :class="d.covered ? '' : 'empty'">{{ d.covered ? d.evidence : '日志中未覆盖该书写板块' }}</div>
+            </div>
+          </div>
+          <div class="writing-reference-comment">{{ evalData.writing_reference.comment }}</div>
         </div>
 
         <!-- 优点 / 需改进（融合岗位职责深度评估） -->
@@ -175,6 +232,8 @@ const updatedAt = ref('')
 const selected = ref('')
 const evalData = ref(null)
 const radarEl = ref(null)
+const periodDownloading = ref('')
+const downloadBusy = computed(() => Boolean(periodDownloading.value))
 let radarChart = null
 
 const needSync = computed(() => (ranking.value.total_people ?? 0) === 0)
@@ -194,6 +253,8 @@ const coveredRoles = computed(() => (evalData.value?.role_detail || []).filter(d
 const uncovRoles = computed(() => (evalData.value?.role_detail || []).filter(d => !d.covered))
 const strengthsList = computed(() => (evalData.value?.strengths_list || []).filter(s => !s.startsWith('岗位职责覆盖')))
 const improvementsList = computed(() => (evalData.value?.improvements_list || []).filter(s => !s.startsWith('岗位职责覆盖不足')))
+const writingRefScore = (p) => (p.log_count && p.writing_reference) ? p.writing_reference.score : null
+function assessCls(s) { return s == null ? '' : s >= 15 ? 'hi' : s >= 10 ? 'mid' : 'lo' }
 
 async function loadRanking() {
   loading.value = true
@@ -252,6 +313,66 @@ function refresh() {
     weeklyRefreshKey.value++  // 重挂载周报组件触发重新加载
   } else {
     loadRanking()
+  }
+}
+
+function filenameFromDisposition(disposition, fallback) {
+  if (!disposition) return fallback
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encoded?.[1]) {
+    try { return decodeURIComponent(encoded[1]) } catch (_) { return encoded[1] }
+  }
+  const plain = disposition.match(/filename="?([^";]+)"?/i)
+  return plain?.[1] || fallback
+}
+
+async function downloadComprehensive(kind, name = '') {
+  const key = kind === 'person' ? `person:${name}` : kind
+  if (periodDownloading.value) return
+  const config = {
+    excel: {
+      url: '/api/logs-comprehensive-export',
+      filename: `${period.value}_管理人员综合评估.xlsx`,
+    },
+    ranking: {
+      url: '/api/logs-comprehensive-ranking-image',
+      filename: `${period.value}_管理人员综合评估排名看板.png`,
+    },
+    batch: {
+      url: '/api/logs-comprehensive-person-images-zip',
+      filename: `${period.value}_管理人员综合评估报告.zip`,
+    },
+    person: {
+      url: '/api/logs-comprehensive-person-image',
+      filename: `${name}_${period.value}_综合评估报告.png`,
+    },
+  }[kind]
+  if (!config) return
+
+  periodDownloading.value = key
+  try {
+    const res = await axios.get(config.url, {
+      params: kind === 'person' ? { period: period.value, name } : { period: period.value },
+      responseType: 'blob',
+      timeout: 300000,
+    })
+    const blob = res.data
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = filenameFromDisposition(res.headers['content-disposition'], config.filename)
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    let detail = e.response?.data?.detail || e.message || '下载失败'
+    if (e.response?.data instanceof Blob) {
+      try { detail = JSON.parse(await e.response.data.text()).detail || detail } catch (_) { /* 保留原始错误 */ }
+    }
+    alert(`❌ ${detail}`)
+  } finally {
+    periodDownloading.value = ''
   }
 }
 
@@ -314,6 +435,13 @@ onBeforeUnmount(() => {
 .update-tag { font-size: 12px; color: #059669; background: #ecfdf5; padding: 3px 10px; border-radius: 20px; }
 .update-time { font-size: 12px; color: #8b8fa8; }
 .refresh-btn { border: none; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.download-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.period-download-btn { border: 1px solid transparent; border-radius: 8px; padding: 7px 11px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .2s; white-space: nowrap; }
+.period-download-btn.excel { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.period-download-btn.ranking { color: #3730a3; background: #eef2ff; border-color: #c7d2fe; }
+.period-download-btn.batch { color: #9a3412; background: #fff7ed; border-color: #fed7aa; }
+.period-download-btn:hover:not(:disabled) { filter: brightness(.97); transform: translateY(-1px); }
+.period-download-btn:disabled, .image-report-btn:disabled { opacity: .55; cursor: wait; transform: none; }
 .period-tabs { display: flex; gap: 4px; background: #fff; border-radius: 10px; padding: 3px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
 .period-tab { border: none; background: transparent; padding: 6px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; color: #555; }
 .period-tab.active { background: #4f46e5; color: #fff; font-weight: 600; }
@@ -348,6 +476,9 @@ onBeforeUnmount(() => {
 .tip-cell.good { color: #059669; }
 .tip-cell.warn { color: #b45309; }
 .tip-cell.cmt { color: #1a1a2e; min-width: 260px; }
+.image-report-cell { text-align: center; }
+.image-report-btn { border: 1px solid #c7d2fe; background: #eef2ff; color: #3730a3; border-radius: 7px; padding: 5px 9px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.image-report-btn:hover:not(:disabled) { background: #e0e7ff; }
 
 .grade-badge { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 700; color: #fff; }
 .grade-badge.gA { background: #059669; }
@@ -364,6 +495,38 @@ onBeforeUnmount(() => {
 .focus-item { flex: 1; background: #fff; border-radius: 10px; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
 .focus-label { font-size: 13px; color: #6b7280; }
 .focus-val { font-size: 18px; font-weight: 700; color: #4f46e5; }
+
+.assess-chip { display: inline-block; min-width: 28px; text-align: center; padding: 2px 6px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+.assess-chip.hi { background: #ecfdf5; color: #047857; }
+.assess-chip.mid { background: #eef2ff; color: #3730a3; }
+.assess-chip.lo { background: #fef2f2; color: #b91c1c; }
+.assess-na { color: #d1d5db; }
+.assess-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+.assess-item { background: #fff; border-radius: 10px; padding: 12px 14px; border: 1px solid #f3f4f6; box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+.assess-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; gap: 8px; }
+.assess-name { font-size: 13px; font-weight: 700; color: #1a1a2e; white-space: nowrap; }
+.assess-score { font-size: 16px; font-weight: 700; }
+.assess-score.hi { color: #047857; }
+.assess-score.mid { color: #3730a3; }
+.assess-score.lo { color: #b91c1c; }
+.assess-cmt { font-size: 12px; color: #4b5563; line-height: 1.55; }
+.assess-template { font-size: 11px; color: #7c3aed; margin: -2px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 管理岗日志书写参考维度覆盖 */
+.writing-reference-panel { background: #fff; border-radius: 12px; padding: 16px; margin-bottom: 14px; box-shadow: 0 1px 4px rgba(0,0,0,.05); border-left: 4px solid #7c3aed; }
+.writing-reference-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.writing-reference-head .panel-title { margin-bottom: 4px; }
+.writing-reference-core { font-size: 12px; color: #6b7280; }
+.writing-reference-score { font-size: 20px; font-weight: 700; white-space: nowrap; }
+.writing-reference-score.hi { color: #047857; }
+.writing-reference-score.mid { color: #3730a3; }
+.writing-reference-score.lo { color: #b91c1c; }
+.writing-reference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.writing-reference-item { border: 1px solid #f3f4f6; border-radius: 8px; padding: 8px 10px; background: #fafafa; }
+.writing-reference-item.covered { border-color: #d1fae5; background: #f0fdf4; }
+.writing-reference-item.missing { border-color: #fed7aa; background: #fffaf5; }
+.writing-reference-name { font-size: 13px; font-weight: 600; color: #1a1a2e; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.writing-reference-comment { font-size: 12px; color: #4b5563; line-height: 1.6; margin-top: 10px; }
 
 /* 岗位职责覆盖（融合进优点/需改进） */
 .role-dot { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; font-size: 11px; color: #fff; flex-shrink: 0; }

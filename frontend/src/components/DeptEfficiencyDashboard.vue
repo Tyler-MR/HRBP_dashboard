@@ -2,12 +2,14 @@
   <div class="dept-eff">
     <header class="page-header">
       <h1><i class="ic ic-chart"></i> 部门人效看板</h1>
-      <span class="update-tag">实时更新</span>
+      <span class="update-tag">每日 00:05 自动更新 · 支持手动同步</span>
       <label class="month-label"><i class="ic ic-cal"></i>
         <input type="month" v-model="month" @change="loadData()" class="month-picker" />
       </label>
       <span class="update-time"><i class="ic ic-clock"></i> {{ updatedAt }}</span>
-      <button class="refresh-btn" @click="loadData"><i class="ic ic-refresh"></i></button>
+      <button class="refresh-btn" @click="syncData" :disabled="loading" title="立即同步钉钉产品/设计/拼多多打品数据">
+        <i class="ic ic-refresh"></i>{{ loading ? ' 同步中' : ' 同步' }}
+      </button>
     </header>
 
     <!-- 部门选择 -->
@@ -92,8 +94,148 @@
         </div>
       </div>
 
-      <!-- 主观评价雷达 — 可打分（人力行政部按 招聘组/行政组 分两个雷达） -->
-      <div class="section-title"><i class="ic ic-radar ic-indigo"></i> 人才雷达图 — 拖动下方滑块直接打分</div>
+      <!-- 拼多多打品分析：钉钉 AI 多维表「拼多多打品成功率」 -->
+      <section v-if="isPddDept && pddAnalysis" class="pdd-analysis-panel">
+        <div class="pdd-analysis-head">
+          <div>
+            <div class="section-title pdd-section-title"><i class="ic ic-trend"></i> 拼多多打品成功率分析</div>
+            <div class="pdd-analysis-subtitle">{{ pddAnalysis.period || month }} · {{ pddAnalysis.source_sheet }} · 每日 00:05 更新，可手动同步</div>
+          </div>
+          <span class="pdd-source-tag"><i class="ic ic-link"></i> 钉钉多维表</span>
+        </div>
+        <div v-if="pddAnalysis.source_error" class="pdd-analysis-error">
+          <i class="ic ic-alert"></i> {{ pddAnalysis.source_error }}
+        </div>
+        <template v-else>
+          <div class="pdd-view-title"><span class="pdd-step">1</span> 团队打品成功率与波动趋势</div>
+          <div class="pdd-kpi-grid">
+            <div class="pdd-kpi-card success-kpi">
+              <span class="pdd-kpi-label">综合打品成功率</span>
+              <strong>{{ Number(pddAnalysis.success_rate || 0).toFixed(1) }}</strong><em>%</em>
+              <small>A款{{ Number(pddAnalysis.a_rate || 0).toFixed(1) }}%×60% + B款{{ Number(pddAnalysis.b_rate || 0).toFixed(1) }}%×40%</small>
+            </div>
+            <div class="pdd-kpi-card b-kpi">
+              <span class="pdd-kpi-label">B款成功率</span>
+              <strong>{{ Number(pddAnalysis.b_rate || 0).toFixed(1) }}</strong><em>%</em>
+              <small>{{ pddAnalysis.b_count }} 个链接 · 日销 500 元+</small>
+            </div>
+            <div class="pdd-kpi-card a-kpi">
+              <span class="pdd-kpi-label">A款成功率</span>
+              <strong>{{ Number(pddAnalysis.a_rate || 0).toFixed(1) }}</strong><em>%</em>
+              <small>{{ pddAnalysis.a_count }} 个链接 · 日销 1000 元+</small>
+            </div>
+            <div class="pdd-kpi-card efficiency-kpi">
+              <span class="pdd-kpi-label">团队人效</span>
+              <strong>{{ Number(pddAnalysis.team_person_efficiency || 0).toFixed(2) }}</strong><em>万元/人</em>
+              <small>销售额 {{ Number(pddAnalysis.team_sales_revenue || 0).toFixed(2) }} 万元 · {{ pddAnalysis.team_size || 0 }}人</small>
+            </div>
+          </div>
+          <div class="pdd-trend-summary" :class="{ 'trend-positive': pddAnalysis.trend_delta > 0, 'trend-negative': pddAnalysis.trend_delta < 0 }">
+            <i class="ic ic-trend"></i>
+            <span v-if="pddAnalysis.trend_delta !== null && pddAnalysis.trend_delta !== undefined">综合成功率较上一个有效月份{{ pddAnalysis.trend_delta > 0 ? '上升' : pddAnalysis.trend_delta < 0 ? '下降' : '持平' }} {{ pddAnalysis.trend_delta > 0 ? '+' : '' }}{{ Number(pddAnalysis.trend_delta).toFixed(1) }} 个百分点</span>
+            <span v-else>当前仅有一个有效月份，暂无环比波动；后续按月沉淀趋势</span>
+          </div>
+          <div class="pdd-analysis-grid">
+            <div class="pdd-trend-card">
+              <div class="pdd-card-title">近 6 个月团队趋势（综合成功率 / A款 / B款）</div>
+              <div v-if="pddAnalysis.trend.length" ref="pddTrendRef" class="pdd-trend-chart"></div>
+              <div v-else class="pdd-empty">暂无趋势数据</div>
+            </div>
+          </div>
+
+          <div class="pdd-owner-card">
+            <div class="pdd-view-title"><span class="pdd-step">2</span> {{ pddAnalysis.period }} 运营打品与业绩综合排名</div>
+            <div class="pdd-ranking-basis">{{ pddAnalysis.ranking_basis }}</div>
+            <div v-if="pddAnalysis.owners.length" class="pdd-owner-table-wrap">
+              <table class="pdd-owner-table">
+                <thead>
+                  <tr><th>排名</th><th>运营</th><th>打品质量</th><th>月销售额</th><th>利润率</th><th>ROI</th><th>综合分</th><th>状态</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="owner in pddAnalysis.owners" :key="owner.name" :class="{ 'pdd-owner-pending': !owner.product_data_available || !owner.performance_available }">
+                    <td><span class="pdd-owner-rank">{{ owner.rank || '—' }}</span></td>
+                    <td><div class="pdd-owner-person"><b>{{ owner.name }}</b><small>{{ owner.product_data_available ? `${owner.product_count}个产品` : '暂无打品记录' }}</small></div></td>
+                    <td><b v-if="owner.product_data_available">{{ Number(owner.success_score || 0).toFixed(1) }}%</b><span v-else>—</span><small v-if="owner.product_data_available">A {{ Number(owner.a_rate || 0).toFixed(1) }}%（{{ owner.a_count }}个） · B {{ Number(owner.b_rate || 0).toFixed(1) }}%（{{ owner.b_count }}个）</small></td>
+                    <td>{{ owner.performance_available ? `${Number(owner.sales_revenue || 0).toFixed(2)}万` : '—' }}</td>
+                    <td :class="Number(owner.profit_margin) < 0 ? 'pdd-negative' : ''">{{ owner.performance_available ? `${Number(owner.profit_margin || 0).toFixed(2)}%` : '—' }}</td>
+                    <td>{{ owner.performance_available ? Number(owner.roi || 0).toFixed(2) : '—' }}</td>
+                    <td><b v-if="owner.rank">{{ Number(owner.combined_score || 0).toFixed(1) }}</b><span v-else>—</span></td>
+                    <td><span class="pdd-owner-status" :class="owner.rank ? 'status-ranked' : 'status-pending'">{{ owner.rank ? '可排名' : (!owner.product_data_available ? '待补打品' : '待补业绩') }}</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div v-else class="pdd-empty">当期暂无可按运营统计的记录</div>
+          </div>
+
+          <div v-if="pddAnalysis.report" class="pdd-report-card">
+            <div class="pdd-view-title"><span class="pdd-step">3</span> 打品成功率 × 人效综合分析报告</div>
+            <div class="pdd-report-headline">{{ pddAnalysis.report.headline }}</div>
+            <p class="pdd-report-conclusion">{{ pddAnalysis.report.conclusion }}</p>
+            <div class="pdd-report-grid">
+              <div><div class="pdd-report-label">关键判断</div><ul><li v-for="item in pddAnalysis.report.highlights" :key="item">{{ item }}</li></ul></div>
+              <div><div class="pdd-report-label">管理建议</div><ul><li v-for="item in pddAnalysis.report.actions" :key="item">{{ item }}</li></ul></div>
+            </div>
+          </div>
+
+          <div v-if="pddAnalysis.supervisor_analysis" class="pdd-supervisor-card">
+            <div class="pdd-view-title"><span class="pdd-step">4</span> 拼多多主管分析 vs AI分析</div>
+            <div class="pdd-supervisor-meta">{{ pddAnalysis.supervisor_analysis.name }} · {{ pddAnalysis.supervisor_analysis.title }} · {{ pddAnalysis.supervisor_analysis.period }} · 来源：管理人员日报</div>
+            <div v-if="pddAnalysis.supervisor_analysis.supervisor_brief" class="pdd-supervisor-brief">
+              <div class="pdd-brief-head">
+                <div class="pdd-supervisor-label">主管补充分析 · {{ pddAnalysis.supervisor_analysis.supervisor_brief.period }}</div>
+                <span class="pdd-brief-source">主管提供</span>
+              </div>
+              <p class="pdd-brief-overall">{{ pddAnalysis.supervisor_analysis.supervisor_brief.overall }}</p>
+              <div class="pdd-brief-grid">
+                <div><div class="pdd-brief-label">人员判断</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.supervisor_brief.people" :key="item">{{ item }}</li></ul></div>
+                <div><div class="pdd-brief-label">本月重点</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.supervisor_brief.focus" :key="item">{{ item }}</li></ul></div>
+              </div>
+              <div class="pdd-brief-compare"><div class="pdd-brief-label">这段文字与AI分析的差异</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.supervisor_brief.ai_comparison" :key="item">{{ item }}</li></ul></div>
+            </div>
+            <div v-if="pddAnalysis.supervisor_analysis.status === 'source_error'" class="pdd-analysis-error">
+              <i class="ic ic-alert"></i> {{ pddAnalysis.supervisor_analysis.source_error }}
+            </div>
+            <template v-else>
+              <div v-if="pddAnalysis.supervisor_analysis.status === 'no_data'" class="pdd-supervisor-empty">
+                <b>当前周期暂无朱康的主管日报原文</b>
+                <span>AI 分析仍基于钉钉打品数据和 MySQL 业绩数据生成，不能替代主管原文或主管判断。</span>
+              </div>
+              <div class="pdd-supervisor-columns">
+                <div class="pdd-supervisor-block supervisor-block">
+                  <div class="pdd-supervisor-label">主管分析（日志维度提炼）</div>
+                  <div v-if="pddAnalysis.supervisor_analysis.status === 'available'" class="pdd-supervisor-covered">
+                    已覆盖：{{ pddAnalysis.supervisor_analysis.covered_dimensions.join('、') || '暂无' }}
+                    <span v-if="pddAnalysis.supervisor_analysis.missing_dimensions.length">；待补：{{ pddAnalysis.supervisor_analysis.missing_dimensions.join('、') }}</span>
+                  </div>
+                  <ul v-if="pddAnalysis.supervisor_analysis.supervisor_focus.length"><li v-for="item in pddAnalysis.supervisor_analysis.supervisor_focus" :key="item">{{ item }}</li></ul>
+                  <span v-else class="pdd-supervisor-muted">暂无主管侧可提炼内容</span>
+                </div>
+                <div class="pdd-supervisor-block ai-block">
+                  <div class="pdd-supervisor-label">AI分析（数据量化）</div>
+                  <ul><li v-for="item in pddAnalysis.supervisor_analysis.ai_focus" :key="item">{{ item }}</li></ul>
+                </div>
+              </div>
+              <div class="pdd-diff-grid">
+                <div class="pdd-diff-block consensus-block"><div class="pdd-supervisor-label">一致判断</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.consensus" :key="item">{{ item }}</li></ul></div>
+                <div class="pdd-diff-block difference-block"><div class="pdd-supervisor-label">核心差异点</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.differences" :key="item">{{ item }}</li></ul></div>
+                <div class="pdd-diff-block"><div class="pdd-supervisor-label">主管独有信息</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.supervisor_only" :key="item">{{ item }}</li></ul></div>
+                <div class="pdd-diff-block"><div class="pdd-supervisor-label">AI独有信息</div><ul><li v-for="item in pddAnalysis.supervisor_analysis.ai_only" :key="item">{{ item }}</li></ul></div>
+              </div>
+              <details v-if="pddAnalysis.supervisor_analysis.raw_text" class="pdd-supervisor-source">
+                <summary>查看主管日报原文（{{ pddAnalysis.supervisor_analysis.log_count }}篇）</summary>
+                <pre>{{ pddAnalysis.supervisor_analysis.raw_text }}</pre>
+              </details>
+              <div v-if="pddAnalysis.supervisor_analysis.conclusion" class="pdd-supervisor-conclusion"><b>对照结论：</b>{{ pddAnalysis.supervisor_analysis.conclusion }}</div>
+            </template>
+          </div>
+
+          <div class="pdd-analysis-note">数据口径：团队成功率按钉钉多维表的 A/B 链接数 ÷ 产品数汇总重算；综合打品成功率 = A款60% + B款40%。运营综合排名 = 打品质量分50% + 月销售额指数50%；业绩列同步展示销售额、利润率和 ROI。无完整两类数据的运营保留展示但不纳入排名。</div>
+        </template>
+      </section>
+
+      <!-- 部门雷达由员工个人评分逐维汇总（人力行政部按 招聘组/行政组 分两个雷达） -->
+      <div class="section-title"><i class="ic ic-radar ic-indigo"></i> 人才雷达图 — 团队成员个人评分汇总</div>
       <div class="score-panel">
         <div class="radar-group" v-for="g in radarGroups" :key="g.group || 'default'">
           <div class="rg-title" v-if="g.group">{{ g.group }}</div>
@@ -102,16 +244,16 @@
             <div class="score-controls">
               <div class="sc-item" v-for="(e, idx) in g.items" :key="e.group + '|' + e.dimension">
                 <div class="sc-dim">{{ e.dimension }}</div>
-                <input type="range" class="sc-slider" min="0" max="100" v-model.number="e.score"
-                       @input="renderRadar" />
-                <input type="number" class="sc-num" min="0" max="100" v-model.number="e.score"
-                       @input="renderRadar" />
-                <span class="sc-badge" :class="scBadge(e.score)">{{ e.score }}</span>
+                <div class="sc-slider dept-score-progress"
+                     role="progressbar"
+                     :aria-valuenow="e.score"
+                     aria-valuemin="0"
+                     aria-valuemax="20"
+                     :style="scoreProgressStyle(e.score, 20)"></div>
+                <input type="number" class="sc-num" min="0" max="20" :value="e.score" readonly />
+                <span class="sc-badge" :class="scBadge(e.score, 20)">{{ e.score }}</span>
               </div>
-              <div class="sc-actions">
-                <button class="sc-btn save" @click="saveScores">💾 保存当前评分</button>
-                <button class="sc-btn reset" @click="resetScores">↺ 重置</button>
-              </div>
+              <div class="sc-hint">部门分数 = 本部门员工个人雷达评分的逐维平均值；五维合计上限100分</div>
             </div>
           </div>
         </div>
@@ -180,10 +322,11 @@
           </div>
           <!-- 下半部分：部门负责人评估（现有内容迁移） -->
           <div class="drawer-section">
-            <div class="drawer-section-title"><i class="ic ic-doc"></i> 部门负责人评估</div>
+            <div class="drawer-section-title"><i class="ic ic-doc"></i> {{ drawerMember.manager_evaluation ? '采购主管人员评价' : '部门负责人评估' }}</div>
             <div class="eval-box">
-              <span class="eval-label"><i class="ic ic-doc"></i> 部门负责人评估</span>
-              <span class="eval-text">{{ drawerMember.evaluation }}</span>
+              <span class="eval-label"><i class="ic ic-doc"></i> {{ drawerMember.manager_evaluation ? '采购主管评价' : '部门负责人评估' }}</span>
+              <span class="eval-text">{{ drawerMember.manager_evaluation || drawerMember.evaluation }}</span>
+              <span v-if="drawerMember.manager_evaluation && drawerMember.evaluation" class="eval-meta">花名册信息：{{ drawerMember.evaluation }}</span>
             </div>
           </div>
           <!-- 下半部分：个人人才雷达图（左图右控件） -->
@@ -208,6 +351,14 @@
                 <div class="sc-hint" v-if="!memberAnyScored">🔵 尚未评分，拖动滑块为 {{ drawerMember.name }} 打分后保存</div>
               </div>
             </div>
+            <div v-if="activeDept.department === '财务团队' && memberScores.some(s => s.standard)" class="mr-standards">
+              <div class="mr-standards-title">岗位重点监控指标</div>
+              <div class="mr-standard-list">
+                <div v-for="s in memberScores" :key="`standard-${s.dimension}`" class="mr-standard-item">
+                  <b>{{ s.dimension }}</b><span>{{ s.standard }}</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </aside>
@@ -225,8 +376,8 @@ const loading = ref(false)
 const updatedAt = ref('--')
 const departments = ref([])
 const current = ref('')
-// 看板设定月份（产品团队按此月统计；拼多多/淘宝自动取最新数据月）
-const month = ref(new Date().toISOString().slice(0, 7))
+// 看板设定月份；首次打开留空，由后端按各真实数据源最新月份返回，避免新月份尚未沉淀数据时白屏
+const month = ref('')
 const radarRef = ref(null)
 const circ = 2 * Math.PI * 50
 
@@ -238,6 +389,7 @@ const sortedMembers = computed(() => {
 })
 // 拼多多团队：指标圆环深蓝填充（无目标值，按用户要求整环填充）
 const isPddDept = computed(() => activeDept.value?.department === '拼多多团队')
+const pddAnalysis = computed(() => activeDept.value?.pdd_product_analysis || null)
 // 产品团队：指标带 group（产品部/设计部）→ 按维度分两行展示
 const isGroupedDept = computed(() => activeDept.value?.metrics?.some(m => m.group) ?? false)
 const metricGroups = computed(() => {
@@ -262,7 +414,6 @@ const radarCharts = {}
 // 可编辑的打分数据
 let editScores = ref([])
 const savedMsg = ref('')
-let timer = null
 let saveTimer = null
 const expandedEval = ref(null)
 
@@ -287,8 +438,10 @@ const drawerMember = ref(null)
 const dailyChartRef = ref(null)
 let dailyChart = null
 const dailyData = ref(null)
+const pddTrendRef = ref(null)
+let pddTrendChart = null
 
-// 个人人才雷达图（每人独立打分入口；维度按部门由后端返回：电商=数据驱动与选品力/店群品效管理/渠道拓展与策略贡献/运营人效/抗压与执行，采购=谈判议价/交付保障/库存管理/供应商开发/跨部门协同，客服=销售转化/售后处理/响应效率/用户洞察/情绪韧性，产品团队=人才质量/组织活力/创新成长/执行力/团队协作）
+// 个人人才雷达图（每人独立打分入口；财务由后端按姓名匹配核算/经营报表/数据审核/发货/出纳岗位五维，未配置人员使用通用财务五维；其他部门沿用各自岗位维度）
 const memberRadarRef = ref(null)
 const memberScores = ref([])
 const memberSavedAt = ref('')
@@ -346,16 +499,38 @@ function renderDaily() {
   dailyChart.resize()
 }
 
+function renderPddTrend() {
+  if (!pddTrendRef.value || !pddAnalysis.value?.trend?.length) return
+  if (!pddTrendChart) pddTrendChart = echarts.init(pddTrendRef.value)
+  const trend = pddAnalysis.value.trend
+  pddTrendChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      valueFormatter: value => `${Number(value).toFixed(1)}%`,
+    },
+    legend: { data: ['综合打品成功率', 'A款成功率', 'B款成功率'], top: 0, textStyle: { fontSize: 11 } },
+    grid: { left: 38, right: 14, top: 30, bottom: 26 },
+    xAxis: { type: 'category', data: trend.map(item => item.month), axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'value', min: 0, max: 100, interval: 20, axisLabel: { fontSize: 10, formatter: '{value}%' } },
+    series: [
+      { name: '综合打品成功率', type: 'line', smooth: true, data: trend.map(item => item.success_rate), lineStyle: { width: 3, color: '#1e3a8a' }, itemStyle: { color: '#1e3a8a' }, areaStyle: { color: 'rgba(30,58,138,0.10)' } },
+      { name: 'B款成功率', type: 'line', smooth: true, data: trend.map(item => item.b_rate), lineStyle: { width: 2, color: '#2563eb' }, itemStyle: { color: '#2563eb' }, areaStyle: { color: 'rgba(37,99,235,0.08)' } },
+      { name: 'A款成功率', type: 'line', smooth: true, data: trend.map(item => item.a_rate), lineStyle: { width: 2, color: '#059669' }, itemStyle: { color: '#059669' } },
+    ],
+  }, true)
+  pddTrendChart.resize()
+}
+
 async function loadMemberRadar(m) {
   try {
     const res = await api.get('/member-radar', { params: { department: activeDept.value.department } })
     const item = res.data.items.find(x => x.name === m.name)
-    // 维度/满分/评分标准以后端返回为准（成员维度=该成员所属组/岗位，电商与设计人员=10分制）
+    // 维度/满分/评分标准以后端返回为准（成员维度=该成员所属组/岗位，统一20分制）
     const dimsMap = Object.fromEntries((res.data.dims || []).map(d => [d.dimension, d]))
     const keys = Object.keys(item?.scores ?? [])
     memberScores.value = keys.map(dim => ({
       dimension: dim,
-      max: dimsMap[dim]?.max || 100,
+      max: dimsMap[dim]?.max || 20,
       standard: dimsMap[dim]?.standard || '',
       score: item?.scores?.[dim] ?? 0,
     }))
@@ -368,7 +543,7 @@ async function loadMemberRadar(m) {
 }
 
 // ── 雷达图统一美化（accent 主色 hex，部门=#4f46e5 / 个人=#059669）──
-function radarOption(sub, accent, chartName) {
+function radarOption(sub, accent, chartName, defaultMax = 20) {
   const rgba = (h, a) => {
     const n = parseInt(h.slice(1), 16)
     return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`
@@ -376,7 +551,7 @@ function radarOption(sub, accent, chartName) {
   return {
     tooltip: { trigger: 'item' },
     radar: {
-      indicator: sub.map(e => ({ name: e.dimension, max: e.max || 100 })),
+      indicator: sub.map(e => ({ name: e.dimension, max: e.max || defaultMax })),
       shape: 'circle',
       center: ['50%', '50%'],
       radius: '66%',
@@ -433,26 +608,33 @@ watch(activeDept, (dept) => {
   disposeRadarCharts()
   if (memberRadarChart) { memberRadarChart.dispose(); memberRadarChart = null }
   if (drawerOpen.value) closeDrawer()  // 切换部门时关闭成员抽屉
-  nextTick(renderRadar)
+  nextTick(() => { renderRadar(); renderPddTrend() })
 }, { deep: true, immediate: false })
+
+watch(pddAnalysis, () => nextTick(renderPddTrend), { deep: true })
 
 function ringColor(m) {
   // 统一翠绿：所有部门圆环与采购人效一致（原按达成率分档：≥90%绿/≥70%蓝/≥50%橙/<50%红、拼多多深蓝）
   return '#059669'
 }
 function ringOff(m) {
-  if (isPddDept.value) return 0  // 拼多多：整环填充
-  const p = m.target ? Math.min(m.value / m.target, 1) : 0
+  if (!m.target || isPddDept.value) return 0
+  const p = Math.min(m.value / m.target, 1)
   return circ * (1 - p)
 }
 function fmt(m) {
   return m.value >= 1000 ? (m.value / 1000).toFixed(1) + 'k' : m.value.toFixed(m.value % 1 === 0 ? 0 : 1)
 }
 function trendLbl(t) { return { up: '↑ 上升', down: '↓ 下降', stable: '→ 持平' }[t] || '' }
-function srcLabel(s) { return { mysql: 'MySQL 实时', pdd: 'MySQL 实时', dingtalk: '钉钉多维表 实时' }[s] || (s + ' 实时') }
+function srcLabel(s) { return { mysql: 'MySQL 实时', pdd: 'MySQL 实时', dingtalk: '钉钉多维表 每日更新' }[s] || (s + ' 实时') }
 function subjColor(s) { return s >= 80 ? '#059669' : s >= 60 ? '#d97706' : '#dc2626' }
 function scoreClass(s, max = 100) { const p = max ? s / max : 0; return p >= 0.9 ? 'sc-a' : p >= 0.7 ? 'sc-b' : p >= 0.5 ? 'sc-c' : 'sc-d' }
-function scBadge(s, max = 100) { return s / max >= 0.8 ? 'badge-green' : s / max >= 0.6 ? 'badge-amber' : 'badge-red' }
+function scBadge(s, max = 20) { return s / max >= 0.8 ? 'badge-green' : s / max >= 0.6 ? 'badge-amber' : 'badge-red' }
+function scoreProgressStyle(s, max = 20) {
+  const score = Number(s) || 0
+  const pct = Math.max(0, Math.min(100, (score / max) * 100))
+  return { '--progress-width': `${pct}%` }
+}
 
 function saveScores() {
   savedMsg.value = '✅ 评分已保存（演示模式）'
@@ -493,7 +675,7 @@ async function loadMemberRadarDims() {
     for (const it of res.data.items || []) {
       map[it.name] = Object.keys(it.scores || {}).map(dim => ({
         dimension: dim,
-        max: dimsMap[dim]?.max || 100,
+        max: dimsMap[dim]?.max || 20,
         standard: dimsMap[dim]?.standard || '',
         score: it.scores?.[dim] ?? 0,
       }))
@@ -505,20 +687,46 @@ async function loadMemberRadarDims() {
   }
 }
 
+function applyDeptData(data) {
+  departments.value = data.items || []
+  updatedAt.value = data.updated_at
+  const latestPddPeriod = departments.value.find(d => d.department === '拼多多团队')?.pdd_product_analysis?.period
+  if (!month.value && latestPddPeriod) month.value = latestPddPeriod
+  if (!current.value && departments.value.length) current.value = departments.value[0].department
+}
+
 async function loadData() {
   loading.value = true
   try {
     const res = await api.get('/dept-efficiency', { params: { month: month.value } })
-    departments.value = res.data.items || []
-    updatedAt.value = res.data.updated_at
-    if (!current.value && departments.value.length) current.value = departments.value[0].department
+    applyDeptData(res.data)
   } catch (e) { console.error(e) } finally { loading.value = false }
+}
+
+async function syncData() {
+  loading.value = true
+  try {
+    const res = await api.post('/sync-dept-efficiency', null, {
+      params: { month: month.value },
+      timeout: 120000,
+    })
+    if (res.data.sync && !res.data.sync.ok) {
+      console.error(res.data.sync.message)
+      return
+    }
+    applyDeptData(res.data)
+  } catch (e) {
+    console.error(e)
+  } finally {
+    loading.value = false
+  }
 }
 
 // 切换部门/加载数据后刷新成员雷达维度列
 watch(activeDept, () => { nextTick(loadMemberRadarDims) }, { deep: true })
-onMounted(() => { loadData(); timer = setInterval(loadData, 30000); window.addEventListener('resize', () => { Object.values(radarCharts).forEach(c => c?.resize()); memberRadarChart?.resize(); dailyChart?.resize() }) })
-onUnmounted(() => { if (timer) clearInterval(timer) })
+const handleResize = () => { Object.values(radarCharts).forEach(c => c?.resize()); memberRadarChart?.resize(); dailyChart?.resize(); pddTrendChart?.resize() }
+onMounted(() => { loadData(); window.addEventListener('resize', handleResize) })
+onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrendChart?.dispose() })
 </script>
 
 <style scoped>
@@ -566,6 +774,105 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .src-tag { font-size: 10px; background: #dbeafe; color: #1d4ed8; padding: 2px 8px; border-radius: 8px; margin-left: 8px; font-weight: 600; vertical-align: middle; }
 .source-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; line-height: 1.6; }
 
+/* 拼多多打品成功率分析 */
+.pdd-analysis-panel { margin-bottom: 18px; border: 1px solid #dbeafe; border-radius: 12px; padding: 14px; background: linear-gradient(135deg, #f8fbff, #f8fffc); }
+.pdd-analysis-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.pdd-section-title { border-top: 0; padding-top: 0; margin-bottom: 3px; color: #1e3a8a; }
+.pdd-analysis-subtitle { font-size: 11px; color: #64748b; }
+.pdd-source-tag { flex-shrink: 0; font-size: 10px; color: #1d4ed8; background: #dbeafe; padding: 4px 8px; border-radius: 8px; }
+.pdd-analysis-error { margin-top: 12px; padding: 9px 12px; border-radius: 8px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; font-size: 12px; }
+.pdd-view-title { display: flex; align-items: center; gap: 7px; margin: 14px 0 9px; color: #1f2937; font-size: 13px; font-weight: 700; }
+.pdd-step { display: inline-flex; width: 20px; height: 20px; align-items: center; justify-content: center; border-radius: 50%; background: #1e3a8a; color: #fff; font-size: 11px; }
+.pdd-kpi-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.pdd-kpi-card { min-height: 82px; padding: 12px; border-radius: 9px; background: #fff; border: 1px solid #e5e7eb; }
+.pdd-kpi-label { display: block; font-size: 11px; color: #64748b; margin-bottom: 5px; }
+.pdd-kpi-card strong { font-size: 24px; line-height: 1; color: #1e3a8a; }
+.pdd-kpi-card em { margin-left: 3px; font-size: 11px; color: #64748b; font-style: normal; }
+.pdd-kpi-card small { display: block; margin-top: 7px; color: #94a3b8; font-size: 10px; }
+.b-kpi { border-top: 3px solid #2563eb; }
+.a-kpi { border-top: 3px solid #059669; }
+.success-kpi { border-top: 3px solid #1e3a8a; }
+.efficiency-kpi { border-top: 3px solid #d97706; }
+.b-kpi strong { color: #2563eb; }
+.a-kpi strong { color: #059669; }
+.success-kpi strong { color: #1e3a8a; }
+.efficiency-kpi strong { color: #b45309; }
+.pdd-trend-summary { display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 8px 10px; border-radius: 7px; background: #f8fafc; color: #64748b; font-size: 11px; }
+.pdd-trend-summary .ic { color: #64748b; }
+.pdd-trend-summary.trend-positive { color: #047857; background: #ecfdf5; }
+.pdd-trend-summary.trend-positive .ic { color: #059669; }
+.pdd-trend-summary.trend-negative { color: #b91c1c; background: #fef2f2; }
+.pdd-trend-summary.trend-negative .ic { color: #dc2626; }
+.pdd-analysis-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+.pdd-trend-card, .pdd-owner-card { min-width: 0; padding: 11px 12px; border-radius: 9px; background: #fff; border: 1px solid #e5e7eb; }
+.pdd-card-title { font-size: 12px; color: #1f2937; font-weight: 700; margin-bottom: 4px; }
+.pdd-trend-chart { height: 210px; width: 100%; }
+.pdd-owner-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.pdd-owner-row { display: grid; grid-template-columns: 22px minmax(58px, 1fr) 42px 58px 58px; align-items: center; gap: 5px; font-size: 11px; }
+.pdd-owner-rank { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #1d4ed8; background: #eff6ff; font-weight: 700; }
+.pdd-owner-name { color: #1f2937; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pdd-owner-products { color: #64748b; text-align: right; }
+.pdd-owner-rate { display: flex; flex-direction: column; align-items: flex-end; }
+.pdd-owner-rate b { color: #059669; font-size: 11px; }
+.pdd-owner-rate small { color: #94a3b8; font-size: 9px; }
+.pdd-ranking-basis { margin: -2px 0 9px; color: #64748b; font-size: 10px; }
+.pdd-owner-table-wrap { overflow-x: auto; }
+.pdd-owner-table { width: 100%; border-collapse: collapse; min-width: 760px; font-size: 11px; }
+.pdd-owner-table th { padding: 8px 7px; color: #64748b; background: #f8fafc; border-bottom: 1px solid #e5e7eb; text-align: left; white-space: nowrap; font-weight: 600; }
+.pdd-owner-table td { padding: 8px 7px; border-bottom: 1px solid #f1f5f9; color: #374151; white-space: nowrap; }
+.pdd-owner-table tbody tr:hover { background: #f8fbff; }
+.pdd-owner-table td:nth-child(1), .pdd-owner-table th:nth-child(1) { text-align: center; width: 44px; }
+.pdd-owner-table td:nth-child(3) b, .pdd-owner-table td:nth-child(7) b { color: #1e3a8a; }
+.pdd-owner-table td small { display: block; margin-top: 2px; color: #94a3b8; font-size: 9px; }
+.pdd-owner-person { display: flex; flex-direction: column; gap: 2px; }
+.pdd-owner-person b { color: #1f2937; }
+.pdd-owner-rank { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #1d4ed8; background: #eff6ff; font-weight: 700; }
+.pdd-owner-pending td { color: #94a3b8; background: #fafafa; }
+.pdd-owner-pending .pdd-owner-rank { color: #9ca3af; background: #f3f4f6; }
+.pdd-negative { color: #dc2626 !important; font-weight: 600; }
+.pdd-owner-status { display: inline-block; padding: 2px 6px; border-radius: 6px; font-size: 10px; }
+.status-ranked { color: #047857; background: #d1fae5; }
+.status-pending { color: #92400e; background: #fef3c7; }
+.pdd-report-card { margin-top: 12px; padding: 12px; border-radius: 9px; border: 1px solid #d1fae5; background: #f0fdf4; }
+.pdd-report-card .pdd-view-title { margin-top: 0; }
+.pdd-report-headline { color: #065f46; font-size: 13px; font-weight: 700; line-height: 1.5; }
+.pdd-report-conclusion { margin: 6px 0 10px; color: #374151; font-size: 11px; line-height: 1.7; }
+.pdd-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.pdd-report-label { color: #047857; font-size: 11px; font-weight: 700; }
+.pdd-report-grid ul { margin: 5px 0 0; padding-left: 17px; color: #4b5563; font-size: 11px; line-height: 1.7; }
+.pdd-supervisor-card { margin-top: 12px; padding: 12px; border-radius: 9px; border: 1px solid #fed7aa; background: linear-gradient(135deg, #fffaf3, #fff); }
+.pdd-supervisor-card .pdd-view-title { margin-top: 0; }
+.pdd-supervisor-meta { margin: -3px 0 10px; color: #9a3412; font-size: 10px; }
+.pdd-supervisor-brief { margin: 0 0 10px; padding: 10px; border: 1px solid #fcd34d; border-radius: 8px; background: #fffdf5; }
+.pdd-brief-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.pdd-brief-source { flex-shrink: 0; padding: 2px 6px; border-radius: 5px; color: #92400e; background: #fef3c7; font-size: 9px; }
+.pdd-brief-overall { margin: 6px 0 8px; color: #78350f; font-size: 11px; line-height: 1.7; font-weight: 600; }
+.pdd-brief-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pdd-brief-label { color: #92400e; font-size: 10px; font-weight: 700; }
+.pdd-brief-grid ul, .pdd-brief-compare ul { margin: 4px 0 0; padding-left: 17px; color: #4b5563; font-size: 10px; line-height: 1.65; }
+.pdd-brief-compare { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #fcd34d; }
+.pdd-supervisor-empty { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px dashed #fdba74; border-radius: 7px; color: #92400e; background: #fff7ed; font-size: 11px; line-height: 1.6; }
+.pdd-supervisor-columns, .pdd-diff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.pdd-supervisor-block, .pdd-diff-block { min-width: 0; padding: 10px; border: 1px solid #e5e7eb; border-radius: 7px; background: #fff; }
+.supervisor-block { border-color: #fde68a; background: #fffdf5; }
+.ai-block { border-color: #bfdbfe; background: #f8fbff; }
+.pdd-supervisor-label { color: #7c2d12; font-size: 11px; font-weight: 700; }
+.ai-block .pdd-supervisor-label { color: #1e40af; }
+.pdd-supervisor-block ul, .pdd-diff-block ul { margin: 5px 0 0; padding-left: 17px; color: #4b5563; font-size: 11px; line-height: 1.65; }
+.pdd-supervisor-covered { margin-top: 5px; color: #92400e; font-size: 10px; line-height: 1.6; }
+.pdd-supervisor-covered span { color: #b45309; }
+.pdd-supervisor-muted { display: inline-block; margin-top: 6px; color: #9ca3af; font-size: 11px; }
+.consensus-block { border-color: #bbf7d0; background: #f0fdf4; }
+.difference-block { border-color: #fecaca; background: #fff7f7; }
+.consensus-block .pdd-supervisor-label { color: #047857; }
+.difference-block .pdd-supervisor-label { color: #b91c1c; }
+.pdd-supervisor-source { margin-top: 10px; border-top: 1px solid #fed7aa; padding-top: 8px; color: #7c2d12; font-size: 11px; }
+.pdd-supervisor-source summary { cursor: pointer; font-weight: 600; }
+.pdd-supervisor-source pre { max-height: 260px; overflow: auto; margin: 7px 0 0; padding: 9px; white-space: pre-wrap; word-break: break-word; border-radius: 6px; background: #fff; color: #4b5563; font: inherit; line-height: 1.6; }
+.pdd-supervisor-conclusion { margin-top: 10px; padding: 8px 10px; border-radius: 7px; color: #7c2d12; background: #fffbeb; font-size: 11px; line-height: 1.7; }
+.pdd-empty { padding: 35px 0; text-align: center; color: #94a3b8; font-size: 12px; }
+.pdd-analysis-note { margin-top: 10px; color: #64748b; font-size: 10px; line-height: 1.6; }
+
 .metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; margin-bottom: 20px; }
 /* 产品团队两行布局：部门标签 + 3 数据项 */
 .dimension-rows { display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px; }
@@ -599,6 +906,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .sc-dim { font-size: 12px; font-weight: 500; color: #374151; width: 96px; flex-shrink: 0; line-height: 1.35; }
 .sc-std { cursor: help; color: #9ca3af; margin-left: 2px; font-size: 11px; }
 .sc-slider { flex: 1; height: 6px; accent-color: #4f46e5; cursor: pointer; }
+.dept-score-progress { border-radius: 999px; background: linear-gradient(to right, #4f46e5 0 var(--progress-width), #e5e7eb var(--progress-width) 100%); cursor: default; }
 .sc-num { width: 48px; padding: 2px 4px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12px; text-align: center; }
 .sc-num:focus { border-color: #4f46e5; outline: none; box-shadow: 0 0 0 2px rgba(79,70,229,0.15); }
 .sc-badge { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 6px; width: 28px; text-align: center; }
@@ -631,6 +939,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 .eval-label { font-size: 11px; font-weight: 600; color: #6b5b9e; }
 .eval-text { font-size: 12px; color: #374151; line-height: 1.7; }
+.eval-meta { font-size: 10px; color: #9ca3af; line-height: 1.5; }
 
 /* 个人人才雷达图 */
 .member-radar-panel { margin-top: 10px; background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px; padding: 12px 14px; }
@@ -653,6 +962,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .daily-chart { width: 100%; height: 180px; }
 .daily-empty { font-size: 12px; color: #9ca3af; background: #f8fafc; border-radius: 8px; padding: 26px 0; text-align: center; }
 .mr-radar-box { height: 230px; width: 45%; min-width: 240px; }
+.mr-standards { margin-top: 12px; padding-top: 10px; border-top: 1px solid #d1fae5; }
+.mr-standards-title { font-size: 12px; font-weight: 700; color: #065f46; margin-bottom: 7px; }
+.mr-standard-list { display: grid; gap: 6px; }
+.mr-standard-item { display: grid; grid-template-columns: 142px 1fr; gap: 8px; align-items: start; font-size: 11px; line-height: 1.5; color: #4b5563; }
+.mr-standard-item b { color: #047857; font-weight: 700; }
 /* 抽屉过渡动画 */
 .drawer-fade-enter-active, .drawer-fade-leave-active { transition: opacity 0.25s; }
 .drawer-fade-enter-from, .drawer-fade-leave-to { opacity: 0; }
@@ -686,4 +1000,8 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .mm-item { display: inline-flex; align-items: center; gap: 3px; background: #f3f4f6; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
 .mm-label { color: #6b7280; }
 .mm-val { color: #1a1a2e; font-weight: 600; }
+@media (max-width: 760px) {
+  .pdd-kpi-grid, .pdd-analysis-grid, .pdd-report-grid, .pdd-brief-grid, .pdd-supervisor-columns, .pdd-diff-grid { grid-template-columns: 1fr; }
+  .pdd-owner-row { grid-template-columns: 22px minmax(50px, 1fr) 38px 52px 52px; }
+}
 </style>
