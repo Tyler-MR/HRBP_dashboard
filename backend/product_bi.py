@@ -23,11 +23,20 @@ import logging
 import re
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from dingtalk_bitable import DingTalkBitableClient
-from schemas import DeptEfficiency, DeptMetric, DeptMember, MemberMetric, SubjectiveEval
+from schemas import (
+    DeptEfficiency,
+    DeptMetric,
+    DeptMember,
+    DesignPerformanceAnalysis,
+    DesignPerformanceDesigner,
+    DesignPerformancePeriod,
+    MemberMetric,
+    SubjectiveEval,
+)
 
 logger = logging.getLogger("product_bi")
 
@@ -44,6 +53,15 @@ DESIGN_SHEET = "3rpDrEF"
 D_DATE_FIELD = "日期"              # date: 毫秒时间戳
 D_PASS_FIELD = "是否通过"          # singleSelect: 仅 '通过' 算通过
 D_OWNER_FIELD = "设计人员"         # singleSelect
+
+# ── 设计稿件品效：月度设计师产出与成本 ──
+DESIGN_PERF_SHEET = "kWwdPAS"
+DP_SHEET_NAME = "稿件品效"
+DP_DESIGNER_FIELD = "设计师"
+DP_MONTH_FIELD = "月份"
+DP_QUANTITY_FIELD = "稿件数量"
+DP_SALARY_FIELD = "月薪"           # 来源字段；接口只输出由此计算的单稿件成本
+DP_FOCUS_MONTHS = ("2026-07", "2026-08")
 
 CACHE_TTL = 24 * 60 * 60  # 每日刷新一次，单位：秒
 ERROR_COOLDOWN = 5 * 60  # 外部接口失败后的重试冷却，单位：秒
@@ -125,13 +143,15 @@ def _fetch_records(base_id: str, sheet_id: str, force: bool = False) -> List[dic
 
 
 def refresh_product_cache() -> dict:
-    """强制刷新产品与设计两张钉钉表，供每日任务和手动同步调用。"""
+    """强制刷新产品、设计日统计与稿件品效三张钉钉表。"""
     product_records = _fetch_records(PRODUCT_BASE, PRODUCT_SHEET, force=True)
     design_records = _fetch_records(DESIGN_BASE, DESIGN_SHEET, force=True)
+    design_performance_records = _fetch_records(DESIGN_BASE, DESIGN_PERF_SHEET, force=True)
     return {
         "product_records": len(product_records),
         "design_records": len(design_records),
-        "record_count": len(product_records) + len(design_records),
+        "design_performance_records": len(design_performance_records),
+        "record_count": len(product_records) + len(design_records) + len(design_performance_records),
         "refreshed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -169,6 +189,39 @@ def _extract_name(val: Any) -> str:
     return str(val) if val is not None else ""
 
 
+def _safe_number(val: Any) -> Optional[float]:
+    """多维表数字/货币字段统一转为数值；空值不参与成本计算。"""
+    if isinstance(val, dict):
+        val = val.get("value", val.get("text", ""))
+    if val is None or str(val).strip() == "":
+        return None
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _year_month(val: Any) -> Optional[str]:
+    """钉钉月份字段 → YYYY-MM，按中国时区解释毫秒时间戳。"""
+    if val is None or val == "":
+        return None
+    if isinstance(val, (int, float)):
+        try:
+            stamp = float(val) / 1000 if abs(float(val)) > 10_000_000_000 else float(val)
+            dt = datetime.fromtimestamp(stamp, tz=timezone.utc) + timedelta(hours=8)
+            return dt.strftime("%Y-%m")
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+    text = _extract_name(val).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y%m%d", "%Y-%m"):
+        try:
+            return datetime.strptime(text[:10], fmt).strftime("%Y-%m")
+        except ValueError:
+            continue
+    match = re.search(r"(20\d{2})[-/年](\d{1,2})", text)
+    return f"{match.group(1)}-{int(match.group(2)):02d}" if match else None
+
+
 def _channel_has_value(val: Any) -> bool:
     """当前已上线渠道是否有值（multipleSelect 可能为 list[dict] / dict / str）。"""
     if val is None:
@@ -183,6 +236,121 @@ def _channel_has_value(val: Any) -> bool:
 def _is_pass(val: Any) -> bool:
     """是否通过 == '通过'（企业自定义口径：仅'通过'算通过）。"""
     return _extract_name(val) == "通过"
+
+
+def _month_label(month: str) -> str:
+    year, number = month.split("-")
+    return f"{year}年{int(number)}月"
+
+
+def _period_label(period_type: str, key: str, months: List[str]) -> str:
+    year = key[:4]
+    if period_type == "month":
+        return _month_label(key)
+    if period_type == "quarter":
+        quarter = int(key[-1])
+        names = {1: "一", 2: "二", 3: "三", 4: "四"}
+        suffix = ""
+        if months:
+            suffix = f"（{int(months[0][5:7])}—{int(months[-1][5:7])}月数据）"
+        return f"{year}年{names.get(quarter, quarter)}季度{suffix}"
+    suffix = ""
+    if months:
+        suffix = f"（{int(months[0][5:7])}—{int(months[-1][5:7])}月数据）"
+    return f"{year}年下半年{suffix}"
+
+
+def _build_design_performance(records: List[dict], focus_months: tuple[str, ...] = DP_FOCUS_MONTHS) -> DesignPerformanceAnalysis:
+    """构建稿件品效排名：单稿件成本=来源月薪/稿件数量，月薪金额不出现在响应中。"""
+    focus = tuple(sorted(set(focus_months)))
+    focus_set = set(focus)
+    rows: List[dict] = []
+    for record in records:
+        fields = record.get("fields", record) if isinstance(record, dict) else {}
+        month = _year_month(fields.get(DP_MONTH_FIELD))
+        if month not in focus_set:
+            continue
+        quantity = _safe_number(fields.get(DP_QUANTITY_FIELD))
+        salary = _safe_number(fields.get(DP_SALARY_FIELD))
+        if quantity is None or quantity <= 0 or salary is None or salary < 0:
+            continue
+        rows.append({
+            "month": month,
+            "designer": _extract_name(fields.get(DP_DESIGNER_FIELD)),
+            "quantity": quantity,
+            "salary": salary,
+        })
+
+    period_defs: List[tuple[str, str, List[str]]] = [
+        ("month", month, [month]) for month in focus
+    ]
+    grouped: Dict[str, List[str]] = {}
+    for month in focus:
+        year, number = month.split("-")
+        quarter_key = f"{year}-Q{(int(number) - 1) // 3 + 1}"
+        grouped.setdefault(quarter_key, []).append(month)
+    period_defs.extend(("quarter", key, months) for key, months in sorted(grouped.items()))
+    halves: Dict[str, List[str]] = {}
+    for month in focus:
+        year, number = month.split("-")
+        half_key = f"{year}-H{'1' if int(number) <= 6 else '2'}"
+        halves.setdefault(half_key, []).append(month)
+    period_defs.extend(("half", key, months) for key, months in sorted(halves.items()))
+
+    periods: List[DesignPerformancePeriod] = []
+    for period_type, key, months in period_defs:
+        period_rows = [row for row in rows if row["month"] in months]
+        department_quantity = sum(row["quantity"] for row in period_rows)
+        department_salary = sum(row["salary"] for row in period_rows)
+        department_unit_cost = (
+            round(department_salary / department_quantity, 2)
+            if department_quantity > 0 else None
+        )
+        by_designer: Dict[str, dict] = {}
+        for row in period_rows:
+            name = row["designer"]
+            if not name:
+                continue
+            stat = by_designer.setdefault(name, {"quantity": 0.0, "salary": 0.0})
+            stat["quantity"] += row["quantity"]
+            stat["salary"] += row["salary"]
+        designer_rows = []
+        for name, stat in by_designer.items():
+            quantity = stat["quantity"]
+            unit_cost = stat["salary"] / quantity if quantity > 0 else None
+            designer_rows.append({"name": name, "quantity": quantity, "unit_cost": unit_cost})
+        designer_rows.sort(key=lambda item: (
+            item["unit_cost"] is None,
+            item["unit_cost"] if item["unit_cost"] is not None else float("inf"),
+            -item["quantity"],
+            item["name"],
+        ))
+        designers = [
+            DesignPerformanceDesigner(
+                rank=index if item["unit_cost"] is not None else 0,
+                name=item["name"],
+                quantity=round(item["quantity"], 2),
+                unit_cost=round(item["unit_cost"], 2) if item["unit_cost"] is not None else None,
+            )
+            for index, item in enumerate(designer_rows, 1)
+        ]
+        periods.append(DesignPerformancePeriod(
+            key=key,
+            label=_period_label(period_type, key, months),
+            period_type=period_type,
+            months=months,
+            department_quantity=round(department_quantity, 2),
+            department_unit_cost=department_unit_cost,
+            designer_count=len(designer_rows),
+            designers=designers,
+        ))
+
+    return DesignPerformanceAnalysis(
+        source_sheet=DP_SHEET_NAME,
+        source_sheet_id=DESIGN_PERF_SHEET,
+        focus_months=list(focus),
+        periods=periods,
+    )
 
 
 def _roster_position(name: str) -> str:
@@ -326,7 +494,7 @@ def member_daily(month: Optional[str], member: str) -> Optional[dict]:
 
 
 def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
-    """构建产品团队人效数据（双维度：产品全流程进度 + 设计每日稿件，按看板设定月份统计）。"""
+    """构建产品团队人效数据（产品/设计维度 + 稿件品效排名）。"""
     if not month:
         month = date.today().strftime("%Y-%m")
     year, ym = (int(month.split("-")[0]), int(month.split("-")[1])) if "-" in month else (date.today().year, int(month))
@@ -334,9 +502,12 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
     try:
         prod_records = _fetch_records(PRODUCT_BASE, PRODUCT_SHEET)
         design_records = _fetch_records(DESIGN_BASE, DESIGN_SHEET)
+        design_performance_records = _fetch_records(DESIGN_BASE, DESIGN_PERF_SHEET)
     except Exception as e:  # noqa: BLE001 — 接口异常降级，不拖垮看板
         logger.error("产品数据源不可用: %s", e)
         return _error_dept(f"钉钉多维表拉取失败：{e}")
+
+    design_performance = _build_design_performance(design_performance_records)
 
     # ═══ 产品维度（离职人员不参与统计，与花名册同步）═══
     prod_target = prod_launched = 0
@@ -434,6 +605,7 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
         metrics=metrics,
         members=members,
         subjective=_SUBJECTIVE,
+        design_performance=design_performance,
         source="dingtalk",
         source_error=None,
     )

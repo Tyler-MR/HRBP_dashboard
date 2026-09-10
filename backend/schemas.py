@@ -345,6 +345,36 @@ class PddProductAnalysis(BaseModel):
     source_error: Optional[str] = None
 
 
+class DesignPerformanceDesigner(BaseModel):
+    """稿件品效中的设计师周期排名（成本仅输出单稿件成本）。"""
+    rank: int = 0
+    name: str
+    quantity: float = 0.0
+    unit_cost: Optional[float] = None
+
+
+class DesignPerformancePeriod(BaseModel):
+    """稿件品效的月度/季度/半年度聚合。"""
+    key: str
+    label: str
+    period_type: str = "month"       # month / quarter / half
+    months: List[str] = []
+    department_quantity: float = 0.0
+    department_unit_cost: Optional[float] = None
+    designer_count: int = 0
+    designers: List[DesignPerformanceDesigner] = []
+
+
+class DesignPerformanceAnalysis(BaseModel):
+    """钉钉多维表「稿件品效」的设计师/部门成本排名。"""
+    source_sheet: str = "稿件品效"
+    source_sheet_id: str = "kWwdPAS"
+    focus_months: List[str] = ["2026-07", "2026-08"]
+    ranking_basis: str = "按单稿件成本升序；稿件数量降序作为同成本时的排序依据"
+    periods: List[DesignPerformancePeriod] = []
+    source_error: Optional[str] = None
+
+
 class SubjectiveEval(BaseModel):
     dimension: str                     # 评价维度
     score: float                       # 雷达单维 0-20
@@ -361,6 +391,7 @@ class DeptEfficiency(BaseModel):
     members: List[DeptMember] = []
     subjective: List[SubjectiveEval] = []
     pdd_product_analysis: Optional[PddProductAnalysis] = None
+    design_performance: Optional[DesignPerformanceAnalysis] = None
     source: Optional[str] = None          # 数据源标识: "mysql"=淘宝BI实时数据
     source_error: Optional[str] = None    # 数据源异常提示（如 MySQL 连接失败已重试）
 
@@ -395,6 +426,12 @@ class MemberScoreSave(BaseModel):
     member: str                                # 成员姓名
     scores: Dict[str, int]                     # 维度 -> 分数（统一 0-20，五维合计上限100）
     position: str = ""                         # 成员岗位（产品团队区分 产品负责人/设计人员）
+
+
+class ManagerEvaluationSave(BaseModel):
+    department: str                            # 部门
+    member: str                                # 成员姓名
+    evaluation: str = ""                       # 直属上级主观评价，可清空
 
 
 # ========== 看板完整响应 ==========

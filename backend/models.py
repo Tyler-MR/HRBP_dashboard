@@ -96,6 +96,21 @@ class MemberScore(Base):
     )
 
 
+class ManagerEvaluation(Base):
+    """部门人效看板中的直属上级主观评价 — 按部门和人员独立保存。"""
+    __tablename__ = "manager_evaluations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    department = Column(String(100), nullable=False, comment="部门")
+    member_name = Column(String(50), nullable=False, comment="员工姓名")
+    evaluation = Column(String(2000), nullable=False, default="", comment="直属上级主观评价")
+    updated_at = Column(String(30), comment="更新时间 YYYY-MM-DD HH:MM:SS")
+
+    __table_args__ = (
+        UniqueConstraint("department", "member_name", name="uq_manager_evaluation_member"),
+    )
+
+
 class Candidate(Base):
     """候选人 — 记录招聘全流程"""
     __tablename__ = "candidates"

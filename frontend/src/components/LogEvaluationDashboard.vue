@@ -46,17 +46,17 @@
       <div class="stat-cards">
         <div class="stat-card"><div class="stat-val">{{ ranking.total_people ?? 0 }}</div><div class="stat-label">评估人数</div></div>
         <div class="stat-card"><div class="stat-val">{{ ranking.total_logs ?? 0 }}</div><div class="stat-label">日志总数</div></div>
-        <div class="stat-card"><div class="stat-val">{{ avgAll }}</div><div class="stat-label">全员平均分</div></div>
+        <div class="stat-card"><div class="stat-val">{{ avgAll }}</div><div class="stat-label">全员综合评分</div></div>
         <div class="stat-card"><div class="stat-val">{{ gradeDist }}</div><div class="stat-label">评级 A/B 人数</div></div>
       </div>
 
       <!-- 排名表 -->
-      <div class="section-title"><i class="ic ic-rank ic-indigo"></i> 管理人员日志综合排名（综合评估，平均分降序）</div>
+      <div class="section-title"><i class="ic ic-rank ic-indigo"></i> 管理人员日志综合评分排名（综合评分降序）</div>
       <div class="rank-table-wrap">
         <table class="rank-table">
           <thead>
             <tr>
-              <th>排名</th><th>姓名</th><th>岗位</th><th>篇数</th><th>平均分</th><th>评级</th>
+              <th>排名</th><th>姓名</th><th>岗位</th><th>篇数</th><th>综合评分</th><th>日志均分</th><th>评级</th>
               <th>岗位书写维度</th><th>优点</th><th>需改进方向</th><th>综合点评</th><th>报告图片</th>
             </tr>
           </thead>
@@ -68,7 +68,8 @@
               <td class="name-cell">{{ p.name }}</td>
               <td>{{ p.title || '—' }}</td>
               <td>{{ p.log_count }}</td>
-              <td class="score-cell"><b>{{ p.avg_score || '—' }}</b></td>
+              <td class="score-cell"><b>{{ p.comp_score || '—' }}</b></td>
+              <td class="sub-score-cell">{{ p.avg_score || '—' }}</td>
               <td><span class="grade-badge" :class="'g' + p.grade">{{ p.grade_cn || '—' }}</span></td>
               <td><span v-if="writingRefScore(p) !== null" class="assess-chip" :class="assessCls(writingRefScore(p))" :title="p.writing_reference?.comment || ''">{{ writingRefScore(p) }}</span><span v-else class="assess-na">—</span></td>
               <td class="tip-cell good">{{ p.strengths }}</td>
@@ -239,9 +240,9 @@ let radarChart = null
 const needSync = computed(() => (ranking.value.total_people ?? 0) === 0)
 const rangeText = computed(() => (ranking.value.start ? `${ranking.value.start} ~ ${ranking.value.end}` : ''))
 const avgAll = computed(() => {
-  const p = ranking.value.people || []
+  const p = (ranking.value.people || []).filter(x => (x.log_count || 0) > 0)
   if (!p.length) return 0
-  return (p.reduce((s, x) => s + (x.avg_score || 0), 0) / p.length).toFixed(1)
+  return (p.reduce((s, x) => s + (x.comp_score || 0), 0) / p.length).toFixed(1)
 })
 const gradeDist = computed(() => {
   const p = ranking.value.people || []

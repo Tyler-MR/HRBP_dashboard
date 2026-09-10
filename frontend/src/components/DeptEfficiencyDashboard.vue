@@ -7,7 +7,7 @@
         <input type="month" v-model="month" @change="loadData()" class="month-picker" />
       </label>
       <span class="update-time"><i class="ic ic-clock"></i> {{ updatedAt }}</span>
-      <button class="refresh-btn" @click="syncData" :disabled="loading" title="立即同步钉钉产品/设计/拼多多打品数据">
+      <button class="refresh-btn" @click="syncData" :disabled="loading" title="立即同步钉钉产品/设计/稿件品效/拼多多打品数据">
         <i class="ic ic-refresh"></i>{{ loading ? ' 同步中' : ' 同步' }}
       </button>
     </header>
@@ -94,6 +94,99 @@
         </div>
       </div>
 
+      <!-- 设计稿件品效：按稿件数量与单稿件成本展示部门/设计师排名 -->
+      <section v-if="isProductDept && designPerformance" class="design-performance-panel">
+        <div class="design-performance-head">
+          <div>
+            <div class="section-title design-section-title"><i class="ic ic-trend"></i> 设计稿件品效排名</div>
+            <div class="design-performance-subtitle">{{ designPerformance.source_sheet }} · 2026年7—8月 · 单稿件成本及排名</div>
+          </div>
+          <span class="design-source-tag"><i class="ic ic-link"></i> 钉钉多维表</span>
+        </div>
+        <div v-if="designPerformance.source_error" class="design-performance-error">
+          <i class="ic ic-alert"></i> {{ designPerformance.source_error }}
+        </div>
+        <template v-else>
+          <div class="design-period-types">
+            <button v-for="type in designPeriodTypes" :key="type.key"
+                    :class="['design-period-type', { active: designPeriodType === type.key }]"
+                    @click="selectDesignPeriodType(type.key)">
+              {{ type.label }}
+            </button>
+          </div>
+          <div v-if="designPeriods.length" class="design-period-pills">
+            <button v-for="period in designPeriods" :key="period.key"
+                    :class="['design-period-pill', { active: designPeriodKey === period.key }]"
+                    @click="designPeriodKey = period.key">
+              {{ period.label }}
+            </button>
+          </div>
+          <div v-if="activeDesignPeriod" class="design-performance-content">
+            <div class="design-summary-grid">
+              <div class="design-summary-card">
+                <span>部门整体稿件数量</span>
+                <strong>{{ fmtQuantity(activeDesignPeriod.department_quantity) }}</strong><em>份</em>
+              </div>
+              <div class="design-summary-card cost-summary">
+                <span>部门整体单稿件成本</span>
+                <strong>{{ fmtCost(activeDesignPeriod.department_unit_cost) }}</strong><em>元/份</em>
+              </div>
+              <div class="design-summary-card">
+                <span>参与设计师</span>
+                <strong>{{ activeDesignPeriod.designer_count }}</strong><em>人</em>
+              </div>
+              <div class="design-summary-card period-summary">
+                <span>当前统计周期</span>
+                <strong>{{ activeDesignPeriod.label }}</strong>
+              </div>
+            </div>
+
+            <div class="design-ranking-grid">
+              <div class="design-ranking-card">
+                <div class="design-card-title">部门整体统计</div>
+                <div class="design-card-hint">按周期汇总，成本为加权单稿件成本</div>
+                <div class="design-table-wrap">
+                  <table class="design-ranking-table design-dept-table">
+                    <thead><tr><th>周期</th><th>稿件数量</th><th>单稿件成本</th><th>设计师数</th></tr></thead>
+                    <tbody>
+                      <tr v-for="period in designPeriods" :key="period.key"
+                          :class="{ selected: designPeriodKey === period.key }"
+                          @click="designPeriodKey = period.key">
+                        <td>{{ period.label }}</td>
+                        <td>{{ fmtQuantity(period.department_quantity) }} 份</td>
+                        <td class="design-cost-cell">{{ fmtCost(period.department_unit_cost) }} 元/份</td>
+                        <td>{{ period.designer_count }} 人</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="design-ranking-card">
+                <div class="design-card-title">{{ activeDesignPeriod.label }} 设计师排名</div>
+                <div class="design-card-hint">按单稿件成本升序，稿件数量降序作为同成本排序依据</div>
+                <div v-if="activeDesignPeriod.designers.length" class="design-table-wrap">
+                  <table class="design-ranking-table">
+                    <thead><tr><th>排名</th><th>设计师</th><th>稿件数量</th><th>单稿件成本</th></tr></thead>
+                    <tbody>
+                      <tr v-for="designer in activeDesignPeriod.designers" :key="designer.name">
+                        <td><span class="design-rank-badge">{{ designer.rank || '—' }}</span></td>
+                        <td class="design-name-cell">{{ designer.name }}</td>
+                        <td>{{ fmtQuantity(designer.quantity) }} 份</td>
+                        <td class="design-cost-cell">{{ fmtCost(designer.unit_cost) }} 元/份</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div v-else class="design-empty">该周期暂无可用稿件品效数据</div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="design-empty">2026年7—8月暂无可用稿件品效数据</div>
+          <div class="design-performance-note">单稿件成本按成本基数 ÷ 稿件数量折算；看板不展示原始薪资字段，仅展示单稿件成本。数据源：{{ designPerformance.source_sheet }}。</div>
+        </template>
+      </section>
+
       <!-- 拼多多打品分析：钉钉 AI 多维表「拼多多打品成功率」 -->
       <section v-if="isPddDept && pddAnalysis" class="pdd-analysis-panel">
         <div class="pdd-analysis-head">
@@ -144,15 +237,15 @@
           </div>
 
           <div class="pdd-owner-card">
-            <div class="pdd-view-title"><span class="pdd-step">2</span> {{ pddAnalysis.period }} 运营打品与业绩综合排名</div>
-            <div class="pdd-ranking-basis">{{ pddAnalysis.ranking_basis }}</div>
-            <div v-if="pddAnalysis.owners.length" class="pdd-owner-table-wrap">
+            <div class="pdd-view-title"><span class="pdd-step">2</span> {{ pddAnalysis.period }} 朱康打品与业绩分析</div>
+            <div class="pdd-ranking-basis">仅展示朱康个人分析 · {{ pddAnalysis.ranking_basis }}</div>
+            <div v-if="pddOwners.length" class="pdd-owner-table-wrap">
               <table class="pdd-owner-table">
                 <thead>
                   <tr><th>排名</th><th>运营</th><th>打品质量</th><th>月销售额</th><th>利润率</th><th>ROI</th><th>综合分</th><th>状态</th></tr>
                 </thead>
                 <tbody>
-                  <tr v-for="owner in pddAnalysis.owners" :key="owner.name" :class="{ 'pdd-owner-pending': !owner.product_data_available || !owner.performance_available }">
+                  <tr v-for="owner in pddOwners" :key="owner.name" :class="{ 'pdd-owner-pending': !owner.product_data_available || !owner.performance_available }">
                     <td><span class="pdd-owner-rank">{{ owner.rank || '—' }}</span></td>
                     <td><div class="pdd-owner-person"><b>{{ owner.name }}</b><small>{{ owner.product_data_available ? `${owner.product_count}个产品` : '暂无打品记录' }}</small></div></td>
                     <td><b v-if="owner.product_data_available">{{ Number(owner.success_score || 0).toFixed(1) }}%</b><span v-else>—</span><small v-if="owner.product_data_available">A {{ Number(owner.a_rate || 0).toFixed(1) }}%（{{ owner.a_count }}个） · B {{ Number(owner.b_rate || 0).toFixed(1) }}%（{{ owner.b_count }}个）</small></td>
@@ -165,7 +258,7 @@
                 </tbody>
               </table>
             </div>
-            <div v-else class="pdd-empty">当期暂无可按运营统计的记录</div>
+            <div v-else class="pdd-empty">当前周期暂无朱康打品或业绩记录</div>
           </div>
 
           <div v-if="pddAnalysis.report" class="pdd-report-card">
@@ -261,7 +354,7 @@
       </div>
 
       <!-- 成员人效 -->
-      <div v-if="activeDept.members.length" class="section-title"><i class="ic ic-users"></i> 成员人效详情</div>
+      <div v-if="activeDept.members.length" class="section-title"><i class="ic ic-users"></i> 成员人效详情 <span class="section-hint-inline">点击成员行可录入直属上级评价</span></div>
       <div v-if="activeDept.members.length" class="member-table-wrap">
         <table class="member-table">
           <thead>
@@ -270,6 +363,7 @@
               <th>职位</th>
               <th>评分</th>
               <th>雷达评估维度</th>
+              <th>直属上级评价</th>
               <th>关键指标</th>
             </tr>
           </thead>
@@ -290,6 +384,11 @@
                   <em class="mrd-score">{{ d.score }}<i class="mrd-max">/{{ d.max }}</i></em>
                 </span>
                 <span v-if="!(memberRadarDims[m.name] || []).length" class="mrd-none">—</span>
+              </td>
+              <td class="m-manager-eval">
+                <span :class="m.manager_evaluation ? 'eval-status-done' : 'eval-status-pending'">
+                  {{ m.manager_evaluation ? '已录入' : '待补充' }}
+                </span>
               </td>
               <td class="m-metrics">
                 <span class="mm-item" v-for="mt in m.metrics" :key="mt.name">
@@ -320,12 +419,34 @@
             <div v-if="dailyData?.series?.length" ref="dailyChartRef" class="daily-chart"></div>
             <div v-else class="daily-empty">当月暂无每日数据</div>
           </div>
-          <!-- 下半部分：部门负责人评估（现有内容迁移） -->
+          <!-- 直属上级主观评价：按部门+人员保存，可在线直接输入 -->
+          <div class="drawer-section manager-eval-section">
+            <div class="drawer-section-title"><i class="ic ic-doc"></i> 直属上级主观评价</div>
+            <div class="manager-eval-box">
+              <textarea
+                v-model="managerEvaluationDraft"
+                class="manager-eval-input"
+                maxlength="2000"
+                rows="5"
+                placeholder="请输入直属上级对该员工的工作表现、优势及改进建议……"
+                @keydown.ctrl.enter.prevent="saveManagerEvaluation"
+              ></textarea>
+              <div class="manager-eval-footer">
+                <span class="manager-eval-count">{{ managerEvaluationDraft.length }}/2000 · Ctrl+Enter 保存</span>
+                <button class="sc-btn save" @click="saveManagerEvaluation" :disabled="managerEvaluationSaving">
+                  {{ managerEvaluationSaving ? '保存中…' : '💾 保存评价' }}
+                </button>
+              </div>
+              <div class="sc-hint" v-if="managerEvaluationMsg">{{ managerEvaluationMsg }}</div>
+            </div>
+          </div>
+
+          <!-- 下半部分：部门负责人评估（花名册/内置信息兼容展示） -->
           <div class="drawer-section">
-            <div class="drawer-section-title"><i class="ic ic-doc"></i> {{ drawerMember.manager_evaluation ? '采购主管人员评价' : '部门负责人评估' }}</div>
+            <div class="drawer-section-title"><i class="ic ic-doc"></i> 已有评价记录</div>
             <div class="eval-box">
-              <span class="eval-label"><i class="ic ic-doc"></i> {{ drawerMember.manager_evaluation ? '采购主管评价' : '部门负责人评估' }}</span>
-              <span class="eval-text">{{ drawerMember.manager_evaluation || drawerMember.evaluation }}</span>
+              <span class="eval-label"><i class="ic ic-doc"></i> {{ drawerMember.manager_evaluation ? '当前直属上级评价' : '部门/花名册信息' }}</span>
+              <span class="eval-text">{{ drawerMember.manager_evaluation || drawerMember.evaluation || '暂无评价记录' }}</span>
               <span v-if="drawerMember.manager_evaluation && drawerMember.evaluation" class="eval-meta">花名册信息：{{ drawerMember.evaluation }}</span>
             </div>
           </div>
@@ -390,6 +511,39 @@ const sortedMembers = computed(() => {
 // 拼多多团队：指标圆环深蓝填充（无目标值，按用户要求整环填充）
 const isPddDept = computed(() => activeDept.value?.department === '拼多多团队')
 const pddAnalysis = computed(() => activeDept.value?.pdd_product_analysis || null)
+// 拼多多打品个人分析按当前业务要求仅保留朱康，团队指标和综合报告仍使用完整团队数据。
+const pddOwners = computed(() => (pddAnalysis.value?.owners || []).filter(owner => owner.name === '朱康'))
+// 设计稿件品效：固定展示用户指定的 2026 年 7—8 月，并支持季度/半年度聚合切换。
+const isProductDept = computed(() => activeDept.value?.department === '产品团队')
+const designPerformance = computed(() => activeDept.value?.design_performance || null)
+const designPeriodTypes = [
+  { key: 'month', label: '月度' },
+  { key: 'quarter', label: '季度' },
+  { key: 'half', label: '半年度' },
+]
+const designPeriodType = ref('month')
+const designPeriodKey = ref('2026-08')
+const designPeriods = computed(() => {
+  return (designPerformance.value?.periods || []).filter(p => p.period_type === designPeriodType.value)
+})
+const activeDesignPeriod = computed(() => {
+  return designPeriods.value.find(p => p.key === designPeriodKey.value)
+    || designPeriods.value[designPeriods.value.length - 1]
+    || null
+})
+function selectDesignPeriodType(type) {
+  designPeriodType.value = type
+  const periods = (designPerformance.value?.periods || []).filter(p => p.period_type === type)
+  designPeriodKey.value = periods[periods.length - 1]?.key || ''
+}
+function fmtQuantity(value) {
+  const n = Number(value)
+  return Number.isFinite(n) ? n.toFixed(n % 1 === 0 ? 0 : 2) : '—'
+}
+function fmtCost(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n.toFixed(2) : '—'
+}
 // 产品团队：指标带 group（产品部/设计部）→ 按维度分两行展示
 const isGroupedDept = computed(() => activeDept.value?.metrics?.some(m => m.group) ?? false)
 const metricGroups = computed(() => {
@@ -440,6 +594,9 @@ let dailyChart = null
 const dailyData = ref(null)
 const pddTrendRef = ref(null)
 let pddTrendChart = null
+const managerEvaluationDraft = ref('')
+const managerEvaluationSaving = ref(false)
+const managerEvaluationMsg = ref('')
 
 // 个人人才雷达图（每人独立打分入口；财务由后端按姓名匹配核算/经营报表/数据审核/发货/出纳岗位五维，未配置人员使用通用财务五维；其他部门沿用各自岗位维度）
 const memberRadarRef = ref(null)
@@ -452,6 +609,8 @@ function openDrawer(m) {
   drawerMember.value = m
   drawerOpen.value = true
   expandedEval.value = m  // 复用雷达图/评分绑定
+  managerEvaluationDraft.value = m.manager_evaluation || ''
+  managerEvaluationMsg.value = ''
   nextTick(async () => {
     await loadMemberRadar(m)
     await loadDaily(m)
@@ -464,6 +623,8 @@ function closeDrawer() {
   expandedEval.value = null
   memberScores.value = []
   memberSavedAt.value = ''
+  managerEvaluationDraft.value = ''
+  managerEvaluationMsg.value = ''
   if (dailyChart) { dailyChart.dispose(); dailyChart = null }
   dailyData.value = null
   if (memberRadarChart) { memberRadarChart.dispose(); memberRadarChart = null }
@@ -595,6 +756,27 @@ async function saveMemberScores() {
     })
     memberSavedAt.value = res.data.updated_at
   } catch (e) { console.error(e) }
+}
+
+async function saveManagerEvaluation() {
+  if (!drawerMember.value || !activeDept.value) return
+  managerEvaluationSaving.value = true
+  managerEvaluationMsg.value = ''
+  try {
+    const res = await api.put('/dept-efficiency/manager-evaluation', {
+      department: activeDept.value.department,
+      member: drawerMember.value.name,
+      evaluation: managerEvaluationDraft.value,
+    })
+    drawerMember.value.manager_evaluation = res.data.evaluation || ''
+    managerEvaluationDraft.value = res.data.evaluation || ''
+    managerEvaluationMsg.value = `✅ 已保存于 ${res.data.updated_at}`
+  } catch (e) {
+    console.error(e)
+    managerEvaluationMsg.value = `❌ 保存失败：${e.response?.data?.detail || '请稍后重试'}`
+  } finally {
+    managerEvaluationSaving.value = false
+  }
 }
 
 watch(activeDept, (dept) => {
@@ -774,6 +956,45 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .src-tag { font-size: 10px; background: #dbeafe; color: #1d4ed8; padding: 2px 8px; border-radius: 8px; margin-left: 8px; font-weight: 600; vertical-align: middle; }
 .source-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; line-height: 1.6; }
 
+/* 设计稿件品效排名 */
+.design-performance-panel { margin-bottom: 18px; border: 1px solid #d1fae5; border-radius: 12px; padding: 14px; background: linear-gradient(135deg, #f8fffc, #f8fbff); }
+.design-performance-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.design-section-title { border-top: 0; padding-top: 0; margin-bottom: 3px; color: #047857; }
+.design-performance-subtitle { font-size: 11px; color: #64748b; }
+.design-source-tag { flex-shrink: 0; font-size: 10px; color: #047857; background: #d1fae5; padding: 4px 8px; border-radius: 8px; }
+.design-performance-error { margin-top: 12px; padding: 9px 12px; border-radius: 8px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; font-size: 12px; }
+.design-period-types { display: flex; gap: 6px; margin-top: 12px; }
+.design-period-type, .design-period-pill { border: 1px solid #d1d5db; border-radius: 7px; padding: 5px 12px; background: #fff; color: #475569; font-size: 11px; cursor: pointer; transition: .15s; }
+.design-period-type:hover, .design-period-pill:hover { border-color: #059669; color: #047857; }
+.design-period-type.active, .design-period-pill.active { border-color: #059669; background: #059669; color: #fff; }
+.design-period-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.design-period-pill { padding: 4px 10px; font-size: 10px; }
+.design-performance-content { margin-top: 12px; }
+.design-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.design-summary-card { min-height: 72px; padding: 11px 12px; border-radius: 9px; background: #fff; border: 1px solid #e5e7eb; border-top: 3px solid #059669; }
+.design-summary-card span { display: block; color: #64748b; font-size: 10px; margin-bottom: 6px; }
+.design-summary-card strong { color: #047857; font-size: 22px; line-height: 1; }
+.design-summary-card em { margin-left: 3px; color: #64748b; font-size: 10px; font-style: normal; }
+.design-summary-card.cost-summary { border-top-color: #d97706; }
+.design-summary-card.cost-summary strong { color: #b45309; }
+.design-summary-card.period-summary { border-top-color: #4f46e5; }
+.design-summary-card.period-summary strong { color: #4338ca; font-size: 16px; }
+.design-ranking-grid { display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 12px; margin-top: 12px; }
+.design-ranking-card { min-width: 0; padding: 11px 12px; border-radius: 9px; background: #fff; border: 1px solid #e5e7eb; }
+.design-card-title { color: #1f2937; font-size: 12px; font-weight: 700; }
+.design-card-hint { margin-top: 3px; color: #94a3b8; font-size: 10px; }
+.design-table-wrap { overflow-x: auto; margin-top: 8px; }
+.design-ranking-table { width: 100%; border-collapse: collapse; min-width: 440px; font-size: 11px; }
+.design-ranking-table th { padding: 7px 6px; color: #64748b; background: #f8fafc; border-bottom: 1px solid #e5e7eb; text-align: left; white-space: nowrap; font-weight: 600; }
+.design-ranking-table td { padding: 8px 6px; border-bottom: 1px solid #f1f5f9; color: #374151; white-space: nowrap; }
+.design-ranking-table tbody tr:hover, .design-ranking-table tbody tr.selected { background: #f0fdf4; }
+.design-ranking-table th:first-child, .design-ranking-table td:first-child { text-align: center; }
+.design-rank-badge { display: inline-flex; align-items: center; justify-content: center; width: 21px; height: 21px; border-radius: 50%; background: #ecfdf5; color: #047857; font-weight: 700; }
+.design-name-cell { color: #1f2937 !important; font-weight: 600; }
+.design-cost-cell { color: #b45309 !important; font-weight: 700; }
+.design-empty { padding: 24px 0; text-align: center; color: #94a3b8; font-size: 11px; }
+.design-performance-note { margin-top: 10px; color: #64748b; font-size: 10px; line-height: 1.6; }
+
 /* 拼多多打品成功率分析 */
 .pdd-analysis-panel { margin-bottom: 18px; border: 1px solid #dbeafe; border-radius: 12px; padding: 14px; background: linear-gradient(135deg, #f8fbff, #f8fffc); }
 .pdd-analysis-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -923,6 +1144,7 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 
 /* 主观评价（旧，保留兼容） */
 .section-title { font-size: 14px; font-weight: 700; color: #1a1a2e; margin-bottom: 10px; padding-top: 4px; border-top: 1px solid #f0f0f0; padding-top: 14px; }
+.section-hint-inline { margin-left: 8px; color: #64748b; font-size: 10px; font-weight: 400; }
 .subj-row { display: flex; gap: 16px; margin-bottom: 16px; align-items: center; }
 .subj-list { flex: 1; display: flex; flex-direction: column; gap: 8px; }
 .subj-item { display: flex; align-items: center; gap: 6px; }
@@ -940,6 +1162,14 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .eval-label { font-size: 11px; font-weight: 600; color: #6b5b9e; }
 .eval-text { font-size: 12px; color: #374151; line-height: 1.7; }
 .eval-meta { font-size: 10px; color: #9ca3af; line-height: 1.5; }
+.manager-eval-section { margin-top: 4px; }
+.manager-eval-box { padding: 10px 12px; border: 1px solid #c7d2fe; border-radius: 10px; background: #f8faff; }
+.manager-eval-input { display: block; width: 100%; min-height: 112px; box-sizing: border-box; resize: vertical; padding: 9px 10px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; color: #1f2937; font: inherit; font-size: 12px; line-height: 1.7; outline: none; }
+.manager-eval-input:focus { border-color: #4f46e5; box-shadow: 0 0 0 2px rgba(79,70,229,0.12); }
+.manager-eval-input::placeholder { color: #9ca3af; }
+.manager-eval-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
+.manager-eval-count { color: #94a3b8; font-size: 10px; }
+.manager-eval-footer .sc-btn { flex-shrink: 0; }
 
 /* 个人人才雷达图 */
 .member-radar-panel { margin-top: 10px; background: #f0fdf4; border: 1px solid #d1fae5; border-radius: 10px; padding: 12px 14px; }
@@ -980,6 +1210,10 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .m-name { font-weight: 600; color: #1a1a2e; }
 .m-pos { color: #6b7280; }
 .m-score { text-align: center; }
+.m-manager-eval { min-width: 76px; text-align: center; }
+.eval-status-done, .eval-status-pending { display: inline-block; padding: 2px 7px; border-radius: 8px; font-size: 10px; white-space: nowrap; }
+.eval-status-done { color: #047857; background: #d1fae5; }
+.eval-status-pending { color: #92400e; background: #fef3c7; }
 /* 雷达评估维度列：维度 chips（已评分=翠绿底+分数，未评分=灰底；文字过长自动换行） */
 .m-radar-dims { display: flex; flex-wrap: wrap; gap: 4px; max-width: 430px; }
 .mrd-chip { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; padding: 2px 8px; border-radius: 9px; cursor: help; line-height: 1.45; text-align: left; overflow-wrap: break-word; word-break: break-all; }
@@ -1001,7 +1235,8 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .mm-label { color: #6b7280; }
 .mm-val { color: #1a1a2e; font-weight: 600; }
 @media (max-width: 760px) {
-  .pdd-kpi-grid, .pdd-analysis-grid, .pdd-report-grid, .pdd-brief-grid, .pdd-supervisor-columns, .pdd-diff-grid { grid-template-columns: 1fr; }
+  .pdd-kpi-grid, .pdd-analysis-grid, .pdd-report-grid, .pdd-brief-grid, .pdd-supervisor-columns, .pdd-diff-grid,
+  .design-summary-grid, .design-ranking-grid { grid-template-columns: 1fr; }
   .pdd-owner-row { grid-template-columns: 22px minmax(50px, 1fr) 38px 52px 52px; }
 }
 </style>

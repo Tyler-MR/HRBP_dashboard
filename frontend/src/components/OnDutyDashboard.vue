@@ -39,12 +39,104 @@
         </span>
       </div>
       <div class="analysis-headline"><b>核心结论：</b>{{ stats.analysis_report.headline }}</div>
-      <div v-if="stats.analysis_report.conclusion" class="analysis-conclusion">
-        <b>管理层最终判断：</b>{{ stats.analysis_report.conclusion }}
+      <div v-if="stats.analysis_report.management_judgment?.length" class="management-judgment">
+        <div class="management-judgment-title">管理层整体判断</div>
+        <div class="judgment-grid">
+          <article v-for="(item, i) in stats.analysis_report.management_judgment" :key="i" class="judgment-item">
+            <span class="judgment-index">{{ String(i + 1).padStart(2, '0') }}</span>
+            <div><h3>{{ item.title }}</h3><p>{{ item.text }}</p></div>
+          </article>
+        </div>
+      </div>
+      <div v-else-if="stats.analysis_report.conclusion" class="analysis-conclusion">
+        <b>管理层整体判断：</b>{{ stats.analysis_report.conclusion }}
+      </div>
+
+      <div v-if="stats.analysis_report.unmapped_persons?.length" class="analysis-section unmapped-section">
+        <div class="analysis-section-title">未映射人员明细（需补齐部门归属）</div>
+        <div class="unmapped-headline">当前有 {{ stats.analysis_report.unmapped_persons.length }} 人未完成部门映射，其工时仅作个人记录，不纳入部门间人效或在岗时长排名。</div>
+        <div class="linkage-table-wrap">
+          <table class="linkage-table unmapped-table">
+            <thead>
+              <tr><th>姓名</th><th>岗位</th><th>平均上班</th><th>平均下班</th><th>平均在岗</th><th>与未映射组人均差</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="person in stats.analysis_report.unmapped_persons" :key="person.name">
+                <td class="linkage-dept"><b>{{ person.name }}</b></td>
+                <td>{{ person.position }}</td>
+                <td>{{ person.on_time }}</td>
+                <td>{{ person.off_time }}</td>
+                <td><b>{{ person.onduty }}</b></td>
+                <td>{{ person.dept_delta }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div class="analysis-summary">
         <div v-for="(item, i) in stats.analysis_report.summary" :key="i" class="summary-item">{{ item }}</div>
+      </div>
+
+      <!-- 工时结果 × 部门人效产出：同一月份、按部门/姓名可追溯关联 -->
+      <div v-if="stats.analysis_report.efficiency_linkage" class="analysis-section linkage-section">
+        <div class="analysis-section-title">工时结果 × 人效产出综合分析</div>
+        <div class="linkage-conclusion">
+          <b>综合结论：</b>{{ stats.analysis_report.efficiency_linkage.conclusion }}
+        </div>
+        <div class="linkage-summary">
+          <div v-for="(item, i) in stats.analysis_report.efficiency_linkage.summary" :key="i" class="linkage-summary-item">{{ item }}</div>
+        </div>
+
+        <div v-if="stats.analysis_report.efficiency_linkage.departments?.length" class="linkage-table-wrap">
+          <table class="linkage-table">
+            <thead>
+              <tr><th>在岗部门</th><th>人效看板关联</th><th>人均在岗</th><th>较标准基线</th><th>主要产出</th><th>二维判断</th><th>个人产出覆盖</th><th>综合分析</th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in stats.analysis_report.efficiency_linkage.departments" :key="row.dept">
+                <td class="linkage-dept"><b>{{ row.dept }}</b><small>{{ row.count }}人</small></td>
+                <td>{{ row.efficiency_department || '未关联' }}<small v-if="row.efficiency_group">{{ row.efficiency_group }}</small></td>
+                <td>{{ row.avg_onduty }}</td>
+                <td>{{ row.baseline_delta }}</td>
+                <td>
+                  <template v-if="row.output">
+                    <b>{{ row.output.display }}</b><small>{{ row.output.label }} · {{ row.output.target_display ? `目标 ${row.output.target_display}` : row.output.trend_label }}</small>
+                  </template>
+                  <span v-else>—</span>
+                </td>
+                <td><span class="linkage-status">{{ row.status }}</span></td>
+                <td>{{ row.coverage }}</td>
+                <td class="linkage-analysis">{{ row.analysis }}<small>{{ row.data_note }}</small></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="stats.analysis_report.efficiency_linkage.employees?.length" class="linkage-person-section">
+          <div class="analysis-section-title">员工级工时 × 个人人效（已匹配产出数据）</div>
+          <div class="linkage-person-note">个人产出仅展示人效看板存在同名成员指标的人员；其他员工仍保留在下方在岗明细中，不用部门平均产出代替个人结果。</div>
+          <div class="linkage-table-wrap">
+            <table class="linkage-table linkage-person-table">
+              <thead>
+                <tr><th>部门</th><th>姓名 / 岗位</th><th>平均在岗</th><th>较标准基线</th><th>部门人均差</th><th>个人主要产出</th><th>二维判断</th><th>分析</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in stats.analysis_report.efficiency_linkage.employees" :key="row.dept + row.name">
+                  <td>{{ row.dept }}</td>
+                  <td class="linkage-dept"><b>{{ row.name }}</b><small>{{ row.position }}</small></td>
+                  <td>{{ row.onduty }}</td>
+                  <td>{{ row.baseline_delta }}</td>
+                  <td>{{ row.dept_delta }}</td>
+                  <td><b>{{ row.metric.display }}</b><small>{{ row.metric.label }} · {{ row.efficiency_department }}{{ row.efficiency_group ? ` · ${row.efficiency_group}` : '' }}</small></td>
+                  <td><span class="linkage-status">{{ row.status }}</span></td>
+                  <td class="linkage-analysis">{{ row.analysis }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="analysis-note">{{ stats.analysis_report.efficiency_linkage.data_note }}</div>
       </div>
 
       <div v-if="stats.analysis_report.metrics?.length" class="analysis-metrics">
@@ -52,18 +144,6 @@
           <div class="analysis-metric-label">{{ metric.label }}</div>
           <div class="analysis-metric-value">{{ metric.value }}</div>
           <div class="analysis-metric-note">{{ metric.note }}</div>
-        </div>
-      </div>
-
-      <div v-if="stats.analysis_report.business_views?.length" class="analysis-section">
-        <div class="analysis-section-title">业务链路解读</div>
-        <div class="business-views">
-          <article v-for="view in stats.analysis_report.business_views" :key="view.title" class="business-view-card">
-            <h3>{{ view.title }}</h3>
-            <div class="business-scope">{{ view.scope }}</div>
-            <div class="business-focus"><b>重点看：</b>{{ view.focus }}</div>
-            <p>{{ view.guidance }}</p>
-          </article>
         </div>
       </div>
 
@@ -422,11 +502,37 @@ onBeforeUnmount(() => {
 .status-no_data .analysis-status { color: #475569; background: #f1f5f9; }
 .analysis-headline { margin-top: 16px; padding: 12px 14px; background: #f5f7ff; color: #3730a3; border-radius: 10px; font-size: 13px; line-height: 1.7; }
 .status-unavailable .analysis-headline { background: #fff7ed; color: #9a3412; }
+.management-judgment { margin-top: 12px; padding: 14px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; }
+.management-judgment-title { color: #1e293b; font-size: 14px; font-weight: 700; margin-bottom: 10px; }
+.judgment-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.judgment-item { display: flex; align-items: flex-start; gap: 9px; min-height: 94px; padding: 11px 12px; background: #fff; border: 1px solid #e5e7eb; border-radius: 9px; }
+.judgment-index { flex: 0 0 auto; color: #4f46e5; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.judgment-item h3 { margin: 0 0 5px; color: #1e293b; font-size: 12px; }
+.judgment-item p { margin: 0; color: #475569; font-size: 12px; line-height: 1.65; }
 .analysis-conclusion { margin-top: 10px; padding: 13px 14px; background: #ecfdf5; border: 1px solid #a7f3d0; border-left: 4px solid #059669; color: #065f46; border-radius: 10px; font-size: 13px; line-height: 1.8; }
 .status-unavailable .analysis-conclusion { background: #fff7ed; border-color: #fed7aa; border-left-color: #d97706; color: #9a3412; }
 .status-no_data .analysis-conclusion { background: #f8fafc; border-color: #e2e8f0; border-left-color: #94a3b8; color: #475569; }
+.unmapped-section { padding: 12px; background: #fffaf0; border: 1px solid #fed7aa; border-radius: 10px; }
+.unmapped-section .analysis-section-title { color: #9a3412; }
+.unmapped-headline { color: #92400e; font-size: 12px; line-height: 1.6; margin: -2px 0 8px; }
+.unmapped-table { min-width: 680px; }
 .analysis-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
 .summary-item { color: #334155; background: #f8fafc; border-radius: 8px; padding: 9px 12px; font-size: 13px; line-height: 1.6; }
+.linkage-conclusion { margin-top: 10px; padding: 12px 14px; background: #f0fdfa; border: 1px solid #99f6e4; border-left: 4px solid #0f766e; color: #134e4a; border-radius: 10px; font-size: 13px; line-height: 1.7; }
+.linkage-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.linkage-summary-item { color: #334155; background: #f8fafc; border-radius: 8px; padding: 8px 11px; font-size: 12px; line-height: 1.6; }
+.linkage-table-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; margin-top: 10px; }
+.linkage-table { width: 100%; min-width: 1060px; border-collapse: collapse; font-size: 12px; }
+.linkage-table th { background: #0f766e; color: #fff; padding: 9px 10px; text-align: left; white-space: nowrap; font-weight: 600; }
+.linkage-table td { padding: 9px 10px; border-bottom: 1px solid #f1f5f9; color: #334155; vertical-align: top; line-height: 1.55; }
+.linkage-table tr:last-child td { border-bottom: none; }
+.linkage-table small { display: block; color: #94a3b8; font-size: 10px; line-height: 1.45; white-space: normal; }
+.linkage-dept b { color: #1e293b; }
+.linkage-status { display: inline-block; color: #0f766e; background: #ccfbf1; border-radius: 20px; padding: 3px 7px; white-space: nowrap; font-size: 11px; font-weight: 600; }
+.linkage-analysis { min-width: 300px; color: #475569 !important; }
+.linkage-person-section { margin-top: 16px; }
+.linkage-person-note { color: #64748b; font-size: 11px; line-height: 1.6; margin: -3px 0 8px; }
+.linkage-person-table { min-width: 980px; }
 .analysis-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
 .analysis-metric { border: 1px solid #eef2f7; border-radius: 10px; padding: 11px 13px; }
 .analysis-metric-label { color: #64748b; font-size: 12px; }
@@ -507,7 +613,7 @@ onBeforeUnmount(() => {
 .no-suggest { background: #ecfdf5; border: 1px solid #a7f3d0; color: #047857; padding: 14px 16px; border-radius: 10px; font-size: 13px; }
 
 @media (max-width: 1000px) {
-  .analysis-metrics, .business-views, .analysis-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .analysis-metrics, .judgment-grid, .analysis-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 680px) {
   .onduty { padding: 16px; }
@@ -515,7 +621,7 @@ onBeforeUnmount(() => {
   .analysis-report { padding: 15px; }
   .analysis-head, .analysis-detail-grid { display: block; }
   .analysis-status { display: inline-block; margin-top: 10px; }
-  .analysis-summary, .analysis-metrics, .business-views, .analysis-findings, .dept-insight-list, .analysis-actions { grid-template-columns: 1fr; }
+  .analysis-summary, .linkage-summary, .analysis-metrics, .judgment-grid, .analysis-findings, .dept-insight-list, .analysis-actions { grid-template-columns: 1fr; }
   .stat-cards { grid-template-columns: repeat(2, 1fr); }
 }
 </style>

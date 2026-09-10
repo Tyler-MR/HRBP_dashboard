@@ -2,10 +2,11 @@
 """各部门在岗时长 BI 数据源 — 钉钉多维表「各部门平均在岗时长」(ZgpG2NdyVXKlg9pBUPyv1eMrWMwvDqPk / sheet iy14FFA)
 
 口径（2026-08，用户确认）：
-- 时间字段统一清洗为「HH时MM分」：源值支持 HH:MM / HH:MM:SS / H时M分（含未补零），
+- 时间字段统一清洗为「HH时MM分」：源值支持 HH:MM / HH:MM:SS / H时M分 / H小时M分（含未补零），
   无法识别的值原样保留并计入 data_error
 - 岗位→部门映射：源表无部门字段，按源数据「部门人均在岗时长」分组 + 用户修正
-  （彭俊=数据分析→技术部；数据分析/数据分析师助理→技术部；其余按分组）
+  （彭俊=数据分析→技术部；数据分析/数据分析师助理→技术部；邹孝云→技术部；
+   王金超→拼多多组；白小雪→采购部；张清照→产品设计部；其余按分组）
 - 一级部门合并规则沿用用户既定口径（拼多多/1688/天猫组→电商部，发货组→财务部）
 - 部门人均在岗时长 = 该部门成员记录的「部门人均在岗时长」均值（保留源表数值；
   技术部因彭俊源值为 09:57 与其余 10:49 不一致，均值约 10:36，已单独提示）
@@ -67,10 +68,18 @@ POS_DEPT = {
     # 技术部（用户修正：数据分析/数据分析师助理 由财务部划出）
     "数据分析": "技术部", "数据分析师助理": "技术部",
 }
+# 用户确认的未映射人员归属（2026-09-09）：姓名修正优先于岗位映射。
+PERSON_DEPT_MAP = {
+    "邹孝云": "技术部",
+    "王金超": "拼多多组",
+    "白小雪": "采购部",
+    "张清照": "产品设计部",
+}
 # 一级部门合并
 L1_MAP = {"拼多多组": "电商部", "1688组": "电商部", "天猫组": "电商部", "发货组": "财务部",
           "采购部": "采购部", "产品部": "产品部", "人力行政部": "人力行政部", "财务部": "财务部",
-          "千川部": "千川部", "商务": "商务", "设计部": "设计部", "技术部": "技术部"}
+          "千川部": "千川部", "商务": "商务", "设计部": "设计部", "技术部": "技术部",
+          "产品设计部": "产品设计部"}
 # 电商运营/投放类部门（晚下班按行业常态说明）
 _OP_DEPTS = {"拼多多组", "千川部", "1688组", "天猫组"}
 
@@ -87,6 +96,7 @@ _DEPT_ANALYSIS_PROFILES = {
     "1688组": {"label": "平台运营与投放", "focus": "客户开发、订单交付、询盘转化和毛利", "action": "重点核查询盘响应、订单交付与客户开发产出是否匹配。"},
     "天猫组": {"label": "平台运营与投放", "focus": "店铺经营、活动转化、毛利和售后体验", "action": "按活动节点安排峰值班次，结合转化、毛利和售后复盘。"},
     "产品部": {"label": "产品与 OEM 协同", "focus": "打样周期、新品上市、质量异常和需求闭环", "action": "排查需求评审、打样、测试和供应链等待造成的协同耗时。"},
+    "产品设计部": {"label": "产品与设计协同", "focus": "需求评审、设计交付、打样测试和新品上市", "action": "排查需求评审、设计返工、打样测试和供应链等待造成的协同耗时。"},
     "采购部": {"label": "采购与 OEM 交付", "focus": "原料/包材到货、成本、交期和供应商异常", "action": "将时长偏高与采购周期、缺料、供应商交期和成本改善一起核查。"},
     "发货组": {"label": "订单履约与仓配", "focus": "发货及时率、爆单处理、错漏发和异常关闭", "action": "结合订单峰值配置弹性排班，关注履约及时率与异常关闭。"},
     "设计部": {"label": "内容与设计交付", "focus": "素材交付及时率、一次通过率和活动支持", "action": "把在岗时长与素材排期、返工次数和活动交付节点对照。"},
@@ -99,7 +109,7 @@ _DEFAULT_ANALYSIS_PROFILE = {"label": "综合协同职能", "focus": "任务交�
 
 # ── 时间解析/格式化 ──
 _TIME_RE_COLON = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2})?$")
-_TIME_RE_CN = re.compile(r"^(\d{1,2})时(\d{1,2})分$")
+_TIME_RE_CN = re.compile(r"^(\d{1,2})(?:时|小时)(\d{1,2})(?:分|分钟)$")
 
 
 def _time_to_minutes(val: Any) -> Optional[int]:
@@ -212,7 +222,7 @@ def _build_records(month: str) -> List[dict]:
         if not name:
             continue
         pos = str(f.get("岗位", "") or "").strip()
-        dept = POS_DEPT.get(pos, "未映射")
+        dept = PERSON_DEPT_MAP.get(name) or POS_DEPT.get(pos, "未映射")
         on = _clean_time(f.get("平均上班打卡时间"))
         off = _clean_time(f.get("平均下班打卡时间"))
         onduty = _clean_time(f.get("平均在岗时间"))
@@ -324,6 +334,389 @@ def _signed_minutes(minutes: Optional[int]) -> str:
     return f"{'+' if minutes > 0 else '-'}{_fmt_minutes(abs(minutes))}"
 
 
+_EFFICIENCY_DEPT_MAP = {
+    # 在岗时长表是细分部门，人效看板是业务团队；这里只做已确认的业务归属映射。
+    "拼多多组": "拼多多团队",
+    "天猫组": "淘宝团队",
+    "人力行政部": "人力团队",
+    "采购部": "采购团队",
+    "产品部": "产品团队",
+    "产品设计部": "产品团队",
+    "设计部": "产品团队",
+    "财务部": "财务团队",
+    "发货组": "财务团队",
+}
+
+# 钉钉在岗表中仍有少量“未映射”岗位，用姓名把已经存在于人效看板的人员接回，
+# 不按猜测把技术、商务、千川或1688数据归入其他团队。
+_EFFICIENCY_PERSON_MAP = {
+    "王金超": ("拼多多团队", ""),
+    "白小雪": ("采购团队", ""),
+    "张清照": ("产品团队", "产品部"),
+}
+_EFFICIENCY_GROUP_MAP = {"产品部": "产品部", "设计部": "设计部", "产品设计部": "产品部"}
+
+_EFFICIENCY_METRIC_PREFERENCE = {
+    "拼多多团队": ["人效(销售额/人)"],
+    "淘宝团队": ["人效(销售额/人)"],
+    "采购团队": ["人效(采购额/人)"],
+    "客服团队": ["人效(处理量/人)"],
+    "财务团队": ["人效(单据处理量/人)"],
+    "人力团队": ["已到岗", "满7天"],
+}
+_EFFICIENCY_MEMBER_METRIC_PREFERENCE = {
+    "拼多多团队": ["月销售额"],
+    "淘宝团队": ["月销售额"],
+    "产品部": ["月度达成率"],
+    "设计部": ["月度通过率"],
+}
+
+
+def _as_dict(value: Any) -> dict:
+    """兼容 Pydantic v1/v2 与普通字典，便于跨模块读取部门人效响应。"""
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    if hasattr(value, "dict"):
+        return value.dict()
+    return {}
+
+
+def _format_output_value(value: Any, unit: str = "") -> str:
+    """人效产出值的短展示格式，保留原单位，不跨部门换算。"""
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return f"{value}{unit}"
+    if unit == "%":
+        return f"{number:.1f}%"
+    if unit in {"万元", "万元/人", "万单", "倍"}:
+        return f"{number:.2f}{unit}"
+    if number.is_integer():
+        return f"{int(number)}{unit}"
+    return f"{number:.1f}{unit}"
+
+
+def _metric_snapshot(metric: Optional[dict]) -> Optional[dict]:
+    """将部门人效指标压缩为可在分析卡片中直接展示的快照。"""
+    if not metric:
+        return None
+    value = metric.get("value")
+    unit = str(metric.get("unit") or "")
+    target = metric.get("target")
+    return {
+        "label": str(metric.get("name") or "产出指标"),
+        "value": value,
+        "unit": unit,
+        "display": _format_output_value(value, unit),
+        "target": target,
+        "target_display": _format_output_value(target, unit) if target is not None else "",
+        "trend": str(metric.get("trend") or "stable"),
+        "trend_label": {"up": "较前期上升", "down": "较前期下降", "stable": "较前期持平"}.get(
+            str(metric.get("trend") or "stable"), "暂无趋势"
+        ),
+    }
+
+
+def _pick_metric(metrics: list, preferred: list) -> Optional[dict]:
+    """按岗位/部门偏好选择一个主要产出指标，避免把不同单位混成一个分数。"""
+    candidates = [_as_dict(metric) for metric in (metrics or [])]
+    candidates = [metric for metric in candidates if metric.get("name")]
+    for name in preferred:
+        match = next((metric for metric in candidates if metric.get("name") == name), None)
+        if match is not None:
+            return match
+    match = next((metric for metric in candidates if str(metric.get("name", "")).startswith("人效")), None)
+    if match is not None:
+        return match
+    return next((metric for metric in candidates if "完成率" in str(metric.get("name", ""))
+                 or "通过率" in str(metric.get("name", ""))), None)
+
+
+def _resolve_efficiency_target(dept: str, name: str) -> tuple:
+    """返回（人效看板团队名，岗位/分组名）；姓名修正优先于部门映射。"""
+    if name in _EFFICIENCY_PERSON_MAP:
+        return _EFFICIENCY_PERSON_MAP[name]
+    return _EFFICIENCY_DEPT_MAP.get(dept, ""), _EFFICIENCY_GROUP_MAP.get(dept, "")
+
+
+def _output_signal(metric: Optional[dict]) -> tuple:
+    """将产出指标转为方向信号；不同单位之间不直接横向比较。"""
+    if not metric or metric.get("value") is None:
+        return "unknown", "暂无可关联的产出指标"
+    target = metric.get("target")
+    value = metric.get("value")
+    if target is not None:
+        try:
+            return ("high", "达到/超过目标") if float(value) >= float(target) else ("low", "低于目标")
+        except (TypeError, ValueError):
+            pass
+    trend = metric.get("trend")
+    if trend == "up":
+        return "high", "较前期上升"
+    if trend == "down":
+        return "low", "较前期下降"
+    return "neutral", "暂无明确升降信号"
+
+
+def _time_signal(delta: Optional[int]) -> str:
+    """按标准班次判断投入信号，±30分钟只作为核查阈值。"""
+    if delta is None:
+        return "unknown"
+    if delta >= 30:
+        return "high"
+    if delta <= -30:
+        return "low"
+    return "neutral"
+
+
+def _combined_status(time_signal: str, output_signal: str) -> str:
+    """工时投入与人效产出二维判断标签。"""
+    if output_signal == "unknown" or time_signal == "unknown":
+        return "数据不足"
+    if time_signal == "high" and output_signal == "high":
+        return "投入偏高·产出同步"
+    if time_signal == "high" and output_signal == "low":
+        return "投入偏高·产出承压"
+    if time_signal == "low" and output_signal == "high":
+        return "投入偏低·产出较好"
+    if time_signal == "low" and output_signal == "low":
+        return "投入偏低·产出不足"
+    if output_signal == "high":
+        return "投入基线内·产出向好"
+    if output_signal == "low":
+        return "投入基线内·产出走弱"
+    return "投入与产出待观察"
+
+
+def _load_efficiency_snapshot(month: str) -> tuple:
+    """读取现有部门人效看板快照；复用其缓存与数据源，不额外触发强制同步。"""
+    try:
+        # main 在应用启动时已加载；运行时读取可避免把部门人效的组装逻辑复制到在岗模块。
+        from main import _dept_metrics_data
+        response = _dept_metrics_data(month or None)
+        items = response.get("items", []) if isinstance(response, dict) else getattr(response, "items", [])
+        return {item.get("department"): item for item in (_as_dict(value) for value in items)
+                if item.get("department")}, None
+    except Exception as exc:  # noqa: BLE001 — 人效源不可用时仍保留工时看板
+        logger.warning("在岗时长关联部门人效失败: %s", exc)
+        return {}, str(exc)
+
+
+def _build_efficiency_linkage(month: str, depts: List[dict], overview: dict) -> dict:
+    """将员工/部门在岗时长与部门人效产出按月份、部门和姓名做可追溯关联。"""
+    efficiency_items, source_error = _load_efficiency_snapshot(month)
+    if source_error:
+        return {
+            "status": "unavailable",
+            "conclusion": "在岗时长数据已读取，但部门人效数据暂不可用，当前不输出工时—产出效率结论。",
+            "summary": ["部门人效接口暂不可用，未用工时数据推断员工效率。", "恢复人效数据后将按同一月份重新关联。"],
+            "departments": [], "employees": [],
+            "coverage": {"dept_total": len(depts), "dept_with_output": 0,
+                          "person_total": overview.get("person_count", 0), "person_with_output": 0},
+            "data_note": f"关联状态：部门人效看板读取失败；{source_error}",
+        }
+
+    dept_rows: List[dict] = []
+    employee_candidates: List[dict] = []
+    for duty_dept in depts:
+        dept = duty_dept.get("dept", "")
+        team_name, group = _resolve_efficiency_target(dept, "")
+        efficiency = efficiency_items.get(team_name)
+        if efficiency:
+            metrics = efficiency.get("metrics") or []
+            preferred = _EFFICIENCY_METRIC_PREFERENCE.get(team_name, [])
+            if team_name == "产品团队" and group:
+                preferred = ["月度达成率" if group == "产品部" else "月度通过率"]
+            output = _metric_snapshot(_pick_metric(metrics, preferred))
+        else:
+            output = None
+        output_signal, output_reason = _output_signal(output)
+        avg_minutes = (duty_dept.get("avg_onduty") or {}).get("minutes")
+        baseline_delta = avg_minutes - STANDARD_ONDUTY_MINUTES if avg_minutes is not None else None
+        time_signal = _time_signal(baseline_delta)
+        matched_members = 0
+        employee_output_count = 0
+        efficiency_members = {}
+        if efficiency:
+            for value in efficiency.get("members", []):
+                member_data = _as_dict(value)
+                if member_data.get("name"):
+                    efficiency_members[str(member_data["name"])] = member_data
+
+        for person in duty_dept.get("persons", []):
+            person_name = str(person.get("name") or "")
+            person_team, person_group = _resolve_efficiency_target(dept, person_name)
+            person_efficiency = efficiency_items.get(person_team)
+            member = efficiency_members.get(person_name) if person_team == team_name else None
+            if person_efficiency and member is None:
+                person_members = {
+                    str(item.get("name")): item
+                    for item in (_as_dict(value) for value in (person_efficiency.get("members") or []))
+                    if item.get("name")
+                }
+                member = person_members.get(person_name)
+            if member is not None:
+                matched_members += 1
+            if not member:
+                continue
+            member_preferred = _EFFICIENCY_MEMBER_METRIC_PREFERENCE.get(
+                person_group or group or person_team, []
+            )
+            member_output = _metric_snapshot(_pick_metric(member.get("metrics") or [], member_preferred))
+            if not member_output:
+                continue
+            employee_output_count += 1
+            person_minutes = (person.get("onduty") or {}).get("minutes")
+            employee_candidates.append({
+                "name": person_name, "dept": dept, "position": person.get("position", ""),
+                "onduty": person.get("onduty") or {},
+                "onduty_minutes": person_minutes,
+                "dept_onduty": duty_dept.get("avg_onduty") or {},
+                "dept_delta_minutes": person_minutes - avg_minutes if person_minutes is not None and avg_minutes is not None else None,
+                "baseline_delta_minutes": person_minutes - STANDARD_ONDUTY_MINUTES if person_minutes is not None else None,
+                "efficiency_department": person_team,
+                "efficiency_group": person_group or group,
+                "metric": member_output,
+            })
+
+        if not team_name:
+            note = "在岗部门暂未配置对应的人效看板团队"
+        elif not efficiency:
+            note = f"人效看板未返回“{team_name}”数据"
+        elif not output:
+            note = "已关联部门人效看板，但当前没有可选的主要产出指标"
+        else:
+            note = f"关联{team_name} · 个人产出 {employee_output_count}/{duty_dept.get('count', 0)} 人"
+
+        if not output:
+            analysis = (
+                f"{dept}人均在岗 {duty_dept.get('avg_onduty', {}).get('display') or '—'}，"
+                "当前缺少同口径人效产出指标，不能仅凭工时判断效率；先补齐部门目标或个人产出数据。"
+            )
+        elif time_signal == "high" and output_signal == "high":
+            analysis = (
+                f"{dept}人均在岗较09时15分—18时30分基线"
+                f" {_signed_minutes(baseline_delta)}，{output['label']}为{output['display']}（{output_reason}）；"
+                "投入与产出信号同步，继续核对履约/交付质量，避免把延时在岗直接等同于有效产出。"
+            )
+        elif time_signal == "high" and output_signal == "low":
+            analysis = (
+                f"{dept}人均在岗较标准基线 {_signed_minutes(baseline_delta)}，"
+                f"但{output['label']}为{output['display']}（{output_reason}）；"
+                "属于优先核查组合，应检查任务堆积、流程等待、工作量分配及产出质量。"
+            )
+        elif time_signal == "low" and output_signal == "high":
+            analysis = (
+                f"{dept}人均在岗较标准基线 {_signed_minutes(baseline_delta)}，"
+                f"{output['label']}为{output['display']}（{output_reason}）；"
+                "当前投入较低但产出信号较好，重点确认数据完整性、交付质量和是否存在未计入工时的工作。"
+            )
+        elif time_signal == "low" and output_signal == "low":
+            analysis = (
+                f"{dept}人均在岗较标准基线 {_signed_minutes(baseline_delta)}，"
+                f"{output['label']}为{output['display']}（{output_reason}）；"
+                "投入与产出均偏弱，建议核查任务饱和度、岗位配置和结果交付。"
+            )
+        else:
+            analysis = (
+                f"{dept}人均在岗 {duty_dept.get('avg_onduty', {}).get('display') or '—'}，"
+                f"{output['label']}为{output['display']}（{output_reason}）；"
+                "当前未形成明确的高低组合，按部门目标和交付质量继续观察。"
+            )
+
+        dept_rows.append({
+            "dept": dept, "l1": duty_dept.get("l1", ""), "count": duty_dept.get("count", 0),
+            "avg_onduty": (duty_dept.get("avg_onduty") or {}).get("display") or "—",
+            "baseline_delta": _signed_minutes(baseline_delta),
+            "efficiency_department": team_name, "efficiency_group": group,
+            "output": output, "output_signal": output_signal, "output_reason": output_reason,
+            "status": _combined_status(time_signal, output_signal), "analysis": analysis,
+            "coverage": f"个人产出 {employee_output_count}/{duty_dept.get('count', 0)} 人",
+            "matched_members": matched_members, "employee_output_count": employee_output_count,
+            "data_note": note,
+        })
+
+    # 只有同一人效团队/分组且有个人产出指标的员工才计算个人可比均值，避免跨岗位混算。
+    peer_groups: Dict[tuple, List[float]] = {}
+    for candidate in employee_candidates:
+        value = candidate["metric"].get("value")
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            continue
+        key = (candidate["efficiency_department"], candidate["efficiency_group"],
+               candidate["metric"]["label"], candidate["metric"]["unit"])
+        peer_groups.setdefault(key, []).append(number)
+
+    employee_rows: List[dict] = []
+    for candidate in employee_candidates:
+        metric = candidate["metric"]
+        value = metric.get("value")
+        key = (candidate["efficiency_department"], candidate["efficiency_group"], metric["label"], metric["unit"])
+        peers = peer_groups.get(key, [])
+        peer_avg = sum(peers) / len(peers) if len(peers) >= 2 else None
+        if peer_avg is None:
+            output_signal, output_reason = "unknown", "暂无同口径个人基准"
+        elif float(value) > peer_avg:
+            output_signal, output_reason = "high", f"高于关联人员均值 {_format_output_value(peer_avg, metric['unit'])}"
+        elif float(value) < peer_avg:
+            output_signal, output_reason = "low", f"低于关联人员均值 {_format_output_value(peer_avg, metric['unit'])}"
+        else:
+            output_signal, output_reason = "neutral", "与关联人员均值持平"
+        baseline_delta = candidate["baseline_delta_minutes"]
+        time_signal = _time_signal(baseline_delta)
+        person_delta = candidate["dept_delta_minutes"]
+        if baseline_delta is None:
+            time_text = "工时缺失"
+        else:
+            time_text = f"平均在岗 {candidate['onduty'].get('display') or '—'}，较标准基线 {_signed_minutes(baseline_delta)}"
+        peer_text = f"（{output_reason}）" if output_reason else ""
+        employee_rows.append({
+            "name": candidate["name"], "dept": candidate["dept"], "position": candidate["position"],
+            "onduty": candidate["onduty"].get("display") or "—",
+            "dept_onduty": candidate["dept_onduty"].get("display") or "—",
+            "dept_delta": _signed_minutes(person_delta),
+            "baseline_delta": _signed_minutes(baseline_delta),
+            "efficiency_department": candidate["efficiency_department"],
+            "efficiency_group": candidate["efficiency_group"], "metric": metric,
+            "output_signal": output_signal, "output_reason": output_reason,
+            "status": _combined_status(time_signal, output_signal),
+            "analysis": f"{time_text}；{metric['label']} {metric['display']}{peer_text}。",
+        })
+
+    output_depts = [row for row in dept_rows if row["output"]]
+    flagged = [row for row in dept_rows if row["status"] in {"投入偏高·产出承压", "投入偏低·产出不足"}]
+    matched_persons = len(employee_rows)
+    dept_total = len(depts)
+    person_total = overview.get("person_count", 0)
+    summary = [
+        f"已将 {dept_total} 个在岗部门与部门人效看板关联，{len(output_depts)} 个部门有可选的主要产出指标。",
+        f"员工级有 {matched_persons}/{person_total} 人同时具备在岗时长和个人产出指标，其余人员保留工时数据，不补造人效结果。",
+        "不同部门的产出单位不同（销售额、采购额、处理量、上线/通过率等），综合分析只在本部门目标或同口径个人基准内判断，不做跨单位横向排名。",
+    ]
+    if flagged:
+        summary.append("优先核查：" + "、".join(row["dept"] for row in flagged[:4]) + "出现工时与产出信号不匹配。")
+    else:
+        summary.append("当前未识别出有明确证据的工时—产出反向组合，仍需持续补齐目标、质量和交付数据。")
+    conclusion = (
+        f"本周期将工时结果与部门人效产出合并观察：{len(output_depts)}/{dept_total} 个在岗部门已接入主要产出指标，"
+        f"员工级可比样本 {matched_persons}/{person_total} 人。工时只代表投入与排班信号，"
+        "最终判断以部门自身产出目标、交付质量和业务结果为准；对工时偏高但产出走弱的部门优先排查流程等待、任务堆积和配置问题，"
+        "对工时偏低但产出较好的部门先核对数据完整性、实际交付和未计入工时的工作，不直接作绩效结论。"
+    )
+    return {
+        "status": "ready", "conclusion": conclusion, "summary": summary,
+        "departments": dept_rows, "employees": employee_rows,
+        "coverage": {"dept_total": dept_total, "dept_with_output": len(output_depts),
+                      "person_total": person_total, "person_with_output": matched_persons},
+        "data_note": "工时来源：钉钉在岗时长；产出来源：部门人效看板。部门按在岗月份关联，个人按姓名匹配；无匹配或无主要产出指标时不补值。",
+    }
+
+
 def _build_industry_analysis_report(month: str, depts: List[dict], overview: dict,
                                     source_error: Optional[str] = None,
                                     no_data: bool = False) -> dict:
@@ -340,11 +733,13 @@ def _build_industry_analysis_report(month: str, depts: List[dict], overview: dic
         "status": "unavailable" if source_error else "no_data" if no_data else "ready",
         "headline": "在岗时长是经营温度计，不是单一绩效结论；必须与产出、交付、质量和客户响应一起看。",
         "conclusion": "",
+        "management_judgment": [],
         "summary": [],
         "metrics": [],
         "findings": [],
-        "business_views": _business_analysis_views(),
         "dept_insights": [],
+        "unmapped_persons": [],
+        "efficiency_linkage": None,
         "actions": [
             {"priority": "P0", "title": "把时长与经营结果绑定",
              "text": "拼多多/千川重点看 GMV、投产比、转化、订单履约和客服响应；研发、采购、生产协同重点看新品周期、OEM 准时交付、质量异常和退货率。"},
@@ -368,6 +763,12 @@ def _build_industry_analysis_report(month: str, depts: List[dict], overview: dic
     }
     if source_error:
         base["conclusion"] = "当前无法形成基于实际在岗数据的部门结论；请先恢复钉钉数据源，再输出部门排名、异常判断和人员配置动作。"
+        base["management_judgment"] = [
+            {"title": "数据状态", "text": "实时在岗数据暂不可用，当前不形成部门排名、异常或效率结论。"},
+            {"title": "管理判断", "text": "暂不据此判断加班、效率或人员不足，避免把数据缺口当成经营结论。"},
+            {"title": "核查重点", "text": "先恢复钉钉数据源，并确认月份、部门映射和上下班字段口径。"},
+            {"title": "下一步", "text": "数据恢复后，再联动产出、交付、质量和服务 SLA 做排班或补员决策。"},
+        ]
         base["summary"] = [
             "实时在岗时长暂不可读取，当前不输出部门排名、个人异常或效率结论。",
             "报告已按家清电商的研产销、OEM 交付和多平台运营链路配置分析口径，数据恢复后自动填充。",
@@ -376,6 +777,12 @@ def _build_industry_analysis_report(month: str, depts: List[dict], overview: dic
         return base
     if no_data:
         base["conclusion"] = f"{period_label}没有可用在岗时长记录，暂不能形成部门结论；请先确认月份、字段口径和岗位映射。"
+        base["management_judgment"] = [
+            {"title": "数据状态", "text": f"{period_label}暂无可用在岗记录，当前不输出部门排名或个人异常。"},
+            {"title": "管理判断", "text": "没有数据不等于没有问题，暂不据此判断效率、饱和度或加班。"},
+            {"title": "核查重点", "text": "确认月份、岗位映射以及平均上班、下班和在岗字段是否完整。"},
+            {"title": "下一步", "text": "补齐有效记录后，再进行部门比较并联动业务产出复核。"},
+        ]
         base["summary"] = [
             f"{period_label}暂无在岗时长记录，当前不输出部门排名、个人异常或效率结论。",
             "建议先确认数据月份、岗位映射和上下班打卡字段，再开始周期比较。",
@@ -393,6 +800,23 @@ def _build_industry_analysis_report(month: str, depts: List[dict], overview: dic
     on_range = f"{_fmt_minutes(min(on_values))}—{_fmt_minutes(max(on_values))}" if on_values else "—"
     missing_dept_avg = [d for d in depts if d["avg_onduty"].get("minutes") is None]
     unmapped_depts = [d for d in depts if d.get("dept") == "未映射"]
+    unmapped_persons = []
+    for unmapped_dept in unmapped_depts:
+        group_avg = (unmapped_dept.get("avg_onduty") or {}).get("minutes")
+        for person in unmapped_dept.get("persons", []):
+            person_avg = (person.get("onduty") or {}).get("minutes")
+            unmapped_persons.append({
+                "name": person.get("name", ""),
+                "position": person.get("position", "") or "未标注岗位",
+                "on_time": (person.get("on_time") or {}).get("display") or "—",
+                "off_time": (person.get("off_time") or {}).get("display") or "—",
+                "onduty": (person.get("onduty") or {}).get("display") or "—",
+                "dept_avg_onduty": (unmapped_dept.get("avg_onduty") or {}).get("display") or "—",
+                "dept_delta": _signed_minutes(
+                    person_avg - group_avg if person_avg is not None and group_avg is not None else None
+                ),
+            })
+    base["unmapped_persons"] = unmapped_persons
     high_deviation, low_deviation, personal_outliers = [], [], []
     if all_avg_minutes is not None:
         for d in depts:
@@ -457,9 +881,38 @@ def _build_industry_analysis_report(month: str, depts: List[dict], overview: dic
         missing_text = "、".join(d["dept"] for d in missing_dept_avg[:3])
         conclusion += f"数据边界：{missing_text}的部门人均在岗暂无法形成可比值，不能据此判断其排名。"
     if unmapped_depts:
-        conclusion += f"另有{sum(d.get('count', 0) for d in unmapped_depts)}人岗位尚未完成部门映射，后续应先补齐组织归属。"
+        unmapped_names = "、".join(person["name"] for person in unmapped_persons if person.get("name"))
+        conclusion += (
+            f"另有{sum(d.get('count', 0) for d in unmapped_depts)}人岗位尚未完成部门映射"
+            f"（{unmapped_names or '姓名待补'}），后续应先补齐组织归属。"
+        )
     conclusion += "当前仅有本周期截面数据，尚无同比或环比基线，不能据此判断趋势变化；管理优先级应为：先补齐数据口径，再将时长与GMV/ROI、订单履约、新品/OEM交付、质量和服务SLA联动复盘，最后决定排班、流程优化或补员。"
     base["conclusion"] = conclusion
+    deviation_text = (
+        f"偏高部门：{'、'.join(d['dept'] for d in high_deviation[:3]) or '无'}；"
+        f"偏低部门：{'、'.join(d['dept'] for d in low_deviation[:3]) or '无'}；"
+        f"个人偏离本部门 1 小时以上：{len(personal_outliers)} 人。"
+    )
+    if late_operator or late_non_operator:
+        signal_text = (
+            f"19:30 后平均下班：运营/投放 {names(late_operator)}；"
+            f"非运营 {names(late_non_operator)}，先核对业务峰值、交付节点与轮休。"
+        )
+    else:
+        signal_text = "当前未触发 19:30 后平均下班部门提示，仍需结合业务峰值和产出复核。"
+    boundary_text = "时长仅反映投入与排班信号，不等同有效工时，不能单独作为绩效或加班结论。"
+    if unmapped_depts:
+        boundary_text += f"另有 {sum(d.get('count', 0) for d in unmapped_depts)} 人待补部门映射。"
+    base["management_judgment"] = [
+        {"title": "整体盘面", "text": f"纳入 {overview.get('dept_count', 0)} 个部门、{overview.get('person_count', 0)} 人；全员平均在岗 {all_avg.get('display') or '—'}，平均下班 {all_off.get('display') or '—'}。"},
+        {"title": "重点信号", "text": deviation_text + " " + signal_text},
+        {"title": "管理判断", "text": boundary_text + "偏高先查任务堆积、流程等待和配置，偏低先查工作量、交付和打卡完整性。"},
+        {"title": "优先动作", "text": "先补齐数据口径和组织映射，再把时长与 GMV/ROI、订单履约、新品/OEM 交付、质量及服务 SLA 联动复盘，最后决定排班、流程优化或补员。"},
+    ]
+
+    # 工时结果与部门人效产出联动：沿用部门人效看板的现有数据源和缓存，
+    # 未能按部门/姓名可靠匹配时明确展示数据不足，不以工时推断效率。
+    base["efficiency_linkage"] = _build_efficiency_linkage(month, depts, overview)
 
     base["findings"] = [
         {"title": "前台经营：时间要和平台结果一起看",

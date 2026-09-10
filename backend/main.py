@@ -8,13 +8,13 @@ from typing import Optional, List, Dict, Any
 
 import threading
 from datetime import datetime as _dt
-from fastapi import FastAPI, Depends, Query
+from fastapi import FastAPI, Depends, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import engine, Base, get_db, SessionLocal
-from models import Recruiter, Position, Candidate, Employee, HrEfficiency, TalentProfile, MemberScore, DailyLog
+from models import Recruiter, Position, Candidate, Employee, HrEfficiency, TalentProfile, MemberScore, ManagerEvaluation, DailyLog
 from schemas import (
     DashboardResponse, OverviewStats, FunnelData, FunnelStage,
     PositionStat, OfferStatusItem, OfferStatusData, RecruiterOutput,
@@ -26,7 +26,7 @@ from schemas import (
     MonthlyStaffTrend,
     DeptMetric, DeptEfficiency, DeptEfficiencyResponse,
     SubjectiveEval, DeptMember, MemberMetric,
-    MemberScoreItem, MemberRadarResponse, MemberScoreSave, RadarDimInfo,
+    MemberScoreItem, MemberRadarResponse, MemberScoreSave, ManagerEvaluationSave, RadarDimInfo,
     TalentDimension, TalentRadarData, DeptTalentScore, TalentAnalysisResponse,
 )
 
@@ -1216,6 +1216,26 @@ def _clear_dept_metrics_cache():
     _dept_metrics_cache["data"].clear()
 
 
+def _apply_manager_evaluations(depts):
+    """把已保存的直属上级主观评价覆盖到部门成员卡片。"""
+    db = SessionLocal()
+    try:
+        rows = db.query(ManagerEvaluation).all()
+    except Exception:  # noqa: BLE001 - 评价表不存在或数据库异常时保留默认内容
+        db.close()
+        return depts
+    db.close()
+
+    saved = {(row.department, row.member_name): row.evaluation or "" for row in rows}
+    for dept in depts:
+        for member in dept.members:
+            key = (dept.department, member.name)
+            if key in saved:
+                # 空字符串也是有意清空，不能回退到代码内置的旧评价。
+                member.manager_evaluation = saved[key]
+    return depts
+
+
 def _hr_team_members():
     """人力团队成员：花名册真实人员（部门=招聘组/行政组/人力行政部，在职）。
 
@@ -1341,7 +1361,11 @@ def _customer_service_team_members():
 
 def _finance_team_members():
     """财务团队成员：财务部 + 发货组在职人员，按财务岗位标签展示。"""
-    members = _roster_dept_members(["财务部", "发货组"], "财务人员")
+    # 财务看板口径：谢辉不纳入财务团队展示（保留花名册原始记录，不影响其他模块）。
+    members = [
+        member for member in _roster_dept_members(["财务部", "发货组"], "财务人员")
+        if member.name != "谢辉"
+    ]
     for member in members:
         role = FINANCE_MEMBER_ROLE.get(member.name)
         if not role:
@@ -1519,6 +1543,9 @@ def _dept_metrics_data(month: Optional[str] = None):
             # 成员=花名册真实人员（财务部在职），不编造占位
             members=fin_members),
     ]
+
+    # 直属上级评价按部门+姓名覆盖内置/花名册评价；评价不参与雷达分数计算。
+    depts = _apply_manager_evaluations(depts)
 
     # 部门雷达统一由员工个人雷达评分逐维汇总（未评分时保留可用的基准值）
     depts = _apply_member_radar_scores(depts)
@@ -1965,6 +1992,40 @@ def save_member_radar(payload: MemberScoreSave, db: Session = Depends(get_db)):
     return {"ok": True, "member": payload.member, "updated_at": now}
 
 
+@app.put("/api/dept-efficiency/manager-evaluation")
+def save_manager_evaluation(payload: ManagerEvaluationSave, db: Session = Depends(get_db)):
+    """保存部门人效看板中的直属上级主观评价，可通过提交空文本清空。"""
+    department = payload.department.strip()
+    member = payload.member.strip()
+    evaluation = (payload.evaluation or "").strip()
+    if not department or not member:
+        raise HTTPException(status_code=422, detail="部门和成员姓名不能为空")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    row = db.query(ManagerEvaluation).filter_by(
+        department=department, member_name=member,
+    ).first()
+    if row:
+        row.evaluation = evaluation
+        row.updated_at = now
+    else:
+        db.add(ManagerEvaluation(
+            department=department,
+            member_name=member,
+            evaluation=evaluation,
+            updated_at=now,
+        ))
+    db.commit()
+    _clear_dept_metrics_cache()
+    return {
+        "ok": True,
+        "department": department,
+        "member": member,
+        "evaluation": evaluation,
+        "updated_at": now,
+    }
+
+
 # ==================== 人才雷达图 + 部门人才质量分析 API ====================
 
 @app.get("/api/talent-analysis", response_model=TalentAnalysisResponse)
@@ -2185,7 +2246,7 @@ def sync_logs_api(days: int = Query(180, ge=1, le=180)):
 def logs_ranking(period: str = Query("month", description="month/quarter/half/year"),
                  dept: str = Query("", description="部门筛选（空=全部）"),
                  db: Session = Depends(get_db)):
-    """管理人员日志评分排名（仅名单内人员，按人聚合平均分降序）。
+    """管理人员日志评分排名（仅名单内人员，按综合评分降序）。
     综合评估 = 五维日志质量 + 岗位职责契合 + 业绩导向 + 团队管理 + 岗位书写参考维度 → 综合评级 A/B/C/D + 综合点评。"""
     from collections import defaultdict
     from log_eval import (person_profile, evaluate_role_fit,
@@ -2255,7 +2316,8 @@ def logs_ranking(period: str = Query("month", description="month/quarter/half/ye
             "last_log_time": latest.create_time.strftime("%Y-%m-%d"),
         })
 
-    people.sort(key=lambda p: (-(p["log_count"] > 0), -p["avg_score"]))
+    # 综合评估看板以最终综合评分排名；日志均分仅作为评分构成中的基础分展示。
+    people.sort(key=lambda p: (-(p["log_count"] > 0), -(p["comp_score"] or 0)))
     for i, p in enumerate(people, 1):
         p["rank"] = i if p["log_count"] > 0 else None
     return {
@@ -3346,7 +3408,9 @@ def logs_weekly_weeks(db: Session = Depends(get_db)):
 def logs_weekly_trend(name: str = Query(...), weeks: int = Query(8, ge=2, le=26),
                       db: Session = Depends(get_db)):
     """个人近 N 周评分趋势（整改效果跟踪）。"""
-    from manager_list import TITLE_MAP, get_role_keywords
+    from manager_list import MANAGER_NAMES, TITLE_MAP, get_role_keywords
+    if name not in MANAGER_NAMES:
+        raise HTTPException(status_code=404, detail="未找到该管理人员")
     from log_eval import (evaluate_role_fit, evaluate_industry_focus, evaluate_writing_reference,
                           comprehensive_eval,
                           _PERF_GROUPS, _MGMT_GROUPS)
