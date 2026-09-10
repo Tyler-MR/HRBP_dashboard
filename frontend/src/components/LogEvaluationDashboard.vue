@@ -3,6 +3,15 @@
     <header class="page-header">
       <h1><i class="ic ic-chart"></i> 管理人员日志评分</h1>
       <span class="update-tag">实时更新</span>
+      <div v-if="viewMode === 'period'" class="month-filter" aria-label="评估月份筛选">
+        <span class="month-filter-label">评估月份</span>
+        <button class="month-nav-btn" type="button" title="上一个月" aria-label="上一个月" @click="shiftMonth(-1)">‹</button>
+        <label class="month-input-wrap">
+          <i class="ic ic-cal"></i>
+          <input v-model="monthFilter" type="month" class="month-picker" aria-label="选择评估月份" @change="changeMonth" />
+        </label>
+        <button class="month-nav-btn" type="button" title="下一个月" aria-label="下一个月" @click="shiftMonth(1)">›</button>
+      </div>
       <div class="period-tabs">
         <button v-for="p in periods" :key="p.value"
                 :class="['period-tab', { active: period === p.value }]"
@@ -35,7 +44,7 @@
       <button class="sync-now" @click="syncLogs" :disabled="syncing">{{ syncing ? '⏳ 同步中…' : '🔄 同步钉钉日志' }}</button>
     </div>
     <div v-else class="sync-banner dim">
-      <span>数据范围：{{ rangeText }}</span>
+      <span>评估月份：{{ monthLabel }} · 数据范围：{{ rangeText }}</span>
       <button class="sync-now" @click="syncLogs" :disabled="syncing">{{ syncing ? '⏳ 同步中…' : '🔄 重新同步' }}</button>
     </div>
 
@@ -220,12 +229,17 @@ const weeklyRefreshKey = ref(0)
 const drawerOpen = ref(false)
 
 const periods = [
-  { value: 'month', label: '本月' },
-  { value: 'quarter', label: '本季' },
-  { value: 'half', label: '半年' },
-  { value: 'year', label: '今年' },
+  { value: 'month', label: '月度' },
+  { value: 'quarter', label: '季度' },
+  { value: 'half', label: '半年度' },
+  { value: 'year', label: '年度' },
 ]
 const period = ref('month')
+function currentMonthValue() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+const monthFilter = ref(currentMonthValue())
 const ranking = ref({ people: [] })
 const loading = ref(false)
 const syncing = ref(false)
@@ -239,6 +253,10 @@ let radarChart = null
 
 const needSync = computed(() => (ranking.value.total_people ?? 0) === 0)
 const rangeText = computed(() => (ranking.value.start ? `${ranking.value.start} ~ ${ranking.value.end}` : ''))
+const monthLabel = computed(() => {
+  const [year, month] = monthFilter.value.split('-')
+  return year && month ? `${year}年${Number(month)}月` : monthFilter.value
+})
 const avgAll = computed(() => {
   const p = (ranking.value.people || []).filter(x => (x.log_count || 0) > 0)
   if (!p.length) return 0
@@ -260,7 +278,7 @@ function assessCls(s) { return s == null ? '' : s >= 15 ? 'hi' : s >= 10 ? 'mid'
 async function loadRanking() {
   loading.value = true
   try {
-    const res = await axios.get('/api/logs-ranking', { params: { period: period.value } })
+    const res = await axios.get('/api/logs-ranking', { params: { period: period.value, month: monthFilter.value } })
     ranking.value = res.data
     updatedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     if (res.data.people?.length && !selected.value) {
@@ -278,7 +296,7 @@ async function loadRanking() {
 async function loadEvaluation(name) {
   selected.value = name
   try {
-    const res = await axios.get('/api/logs-evaluation', { params: { name, period: period.value } })
+    const res = await axios.get('/api/logs-evaluation', { params: { name, period: period.value, month: monthFilter.value } })
     evalData.value = res.data
     await nextTick()
     renderCharts()
@@ -300,6 +318,19 @@ function closeDrawer() {
 function switchPeriod(p) {
   if (period.value === p) return
   period.value = p
+  loadRanking()
+}
+
+function changeMonth() {
+  if (!/^\d{4}-\d{2}$/.test(monthFilter.value)) return
+  loadRanking()
+}
+
+function shiftMonth(delta) {
+  const [year, month] = monthFilter.value.split('-').map(Number)
+  if (!year || !month) return
+  const shifted = new Date(year, month - 1 + delta, 1)
+  monthFilter.value = `${shifted.getFullYear()}-${String(shifted.getMonth() + 1).padStart(2, '0')}`
   loadRanking()
 }
 
@@ -333,19 +364,19 @@ async function downloadComprehensive(kind, name = '') {
   const config = {
     excel: {
       url: '/api/logs-comprehensive-export',
-      filename: `${period.value}_管理人员综合评估.xlsx`,
+      filename: `${monthFilter.value}_${period.value}_管理人员综合评估.xlsx`,
     },
     ranking: {
       url: '/api/logs-comprehensive-ranking-image',
-      filename: `${period.value}_管理人员综合评估排名看板.png`,
+      filename: `${monthFilter.value}_${period.value}_管理人员综合评估排名看板.png`,
     },
     batch: {
       url: '/api/logs-comprehensive-person-images-zip',
-      filename: `${period.value}_管理人员综合评估报告.zip`,
+      filename: `${monthFilter.value}_${period.value}_管理人员综合评估报告.zip`,
     },
     person: {
       url: '/api/logs-comprehensive-person-image',
-      filename: `${name}_${period.value}_综合评估报告.png`,
+      filename: `${name}_${monthFilter.value}_${period.value}_综合评估报告.png`,
     },
   }[kind]
   if (!config) return
@@ -353,7 +384,9 @@ async function downloadComprehensive(kind, name = '') {
   periodDownloading.value = key
   try {
     const res = await axios.get(config.url, {
-      params: kind === 'person' ? { period: period.value, name } : { period: period.value },
+      params: kind === 'person'
+        ? { period: period.value, month: monthFilter.value, name }
+        : { period: period.value, month: monthFilter.value },
       responseType: 'blob',
       timeout: 300000,
     })
@@ -434,6 +467,12 @@ onBeforeUnmount(() => {
 .page-header { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
 .page-header h1 { font-size: 20px; color: #1a1a2e; display: flex; align-items: center; gap: 8px; }
 .update-tag { font-size: 12px; color: #059669; background: #ecfdf5; padding: 3px 10px; border-radius: 20px; }
+.month-filter { display: inline-flex; align-items: center; gap: 5px; padding: 3px 6px 3px 10px; background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.05); }
+.month-filter-label { color: #475569; font-size: 12px; white-space: nowrap; }
+.month-input-wrap { display: inline-flex; align-items: center; gap: 4px; color: #4f46e5; }
+.month-picker { border: none; background: transparent; color: #1f2937; font: inherit; font-size: 12px; min-width: 112px; padding: 3px 2px; outline: none; cursor: pointer; }
+.month-nav-btn { width: 23px; height: 23px; border: none; border-radius: 6px; background: #eef2ff; color: #3730a3; cursor: pointer; font-size: 18px; line-height: 1; padding: 0; }
+.month-nav-btn:hover { background: #e0e7ff; }
 .update-time { font-size: 12px; color: #8b8fa8; }
 .refresh-btn { border: none; background: #fff; border-radius: 8px; padding: 6px 10px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .download-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -578,4 +617,12 @@ onBeforeUnmount(() => {
 .drawer-close { border: none; background: #f3f4f6; color: #4b5563; width: 32px; height: 32px; border-radius: 50%; font-size: 14px; cursor: pointer; flex-shrink: 0; transition: all .2s; }
 .drawer-close:hover { background: #fee2e2; color: #dc2626; }
 .drawer-body { padding: 16px 20px 32px; overflow-y: auto; flex: 1; }
+@media (max-width: 900px) {
+  .month-filter { order: 3; }
+  .period-tabs { order: 4; }
+  .view-switch { order: 5; }
+  .update-time { order: 6; }
+  .refresh-btn { order: 7; }
+  .download-actions { order: 8; width: 100%; }
+}
 </style>

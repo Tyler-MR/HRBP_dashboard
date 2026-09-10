@@ -2191,19 +2191,50 @@ def sync_recruitment():
 # 管理人员日志评分（钉钉日报 → 规则评分 → 排名/优点/需改进）
 # ═══════════════════════════════════════════════════
 
-def _logs_period_range(period: str) -> tuple:
-    """按粒度取「本周期至今」时间区间。"""
+def _normalize_logs_month(month: Optional[str]) -> Optional[str]:
+    """校验并标准化日志筛选月份，返回 YYYY-MM；空值表示当前月份。"""
+    if month is None or str(month).strip() == "":
+        return None
+    value = str(month).strip()
+    try:
+        return datetime.strptime(value, "%Y-%m").strftime("%Y-%m")
+    except ValueError as exc:
+        raise ValueError("月份格式应为 YYYY-MM") from exc
+
+
+def _logs_period_range(period: str, month: Optional[str] = None) -> tuple:
+    """按粒度取时间区间；传入 month 时，以该月作为季度/半年/年度锚点。"""
+    if period not in _LOGS_PERIOD_LABELS:
+        raise ValueError("周期参数应为 month/quarter/half/year")
     now = datetime.now()
-    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_key = _normalize_logs_month(month)
+    anchor = datetime.strptime(month_key, "%Y-%m") if month_key else now
+    anchor = anchor.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     if period == "month":
-        pass
+        start = anchor
+        end_month = anchor.month + 1
     elif period == "quarter":
-        start = now.replace(month=((now.month - 1) // 3) * 3 + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+        start = anchor.replace(month=((anchor.month - 1) // 3) * 3 + 1)
+        end_month = start.month + 3
     elif period == "half":
-        start = now.replace(month=(1 if now.month <= 6 else 7), day=1, hour=0, minute=0, second=0, microsecond=0)
-    elif period == "year":
-        start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-    return start, now
+        start = anchor.replace(month=(1 if anchor.month <= 6 else 7))
+        end_month = start.month + 6
+    else:  # year
+        start = anchor.replace(month=1)
+        end_month = 13
+
+    end_year = start.year + ((end_month - 1) // 12)
+    end_month = ((end_month - 1) % 12) + 1
+    end_start = start.replace(year=end_year, month=end_month)
+
+    # 未指定月份时保持原逻辑：统计从本周期开始到当前时刻；
+    # 指定历史月份时统计完整周期，指定当前月份时截止到当前时刻。
+    if month_key is None:
+        end = now
+    else:
+        end = min(now, end_start - timedelta(microseconds=1))
+    return start, end
 
 
 _LOGS_PERIOD_LABELS = {
@@ -2214,10 +2245,20 @@ _LOGS_PERIOD_LABELS = {
 }
 
 
-def _logs_period_label(period: str) -> str:
+def _logs_period_label(period: str, month: Optional[str] = None) -> str:
     """返回综合评估页面使用的周期名称，并校验下载接口的周期参数。"""
     if period not in _LOGS_PERIOD_LABELS:
         raise ValueError("周期参数应为 month/quarter/half/year")
+    month_key = _normalize_logs_month(month)
+    if month_key:
+        anchor = datetime.strptime(month_key, "%Y-%m")
+        if period == "month":
+            return f"{anchor.year}年{anchor.month}月"
+        if period == "quarter":
+            return f"{anchor.year}年第{((anchor.month - 1) // 3) + 1}季度"
+        if period == "half":
+            return f"{anchor.year}年下半年" if anchor.month > 6 else f"{anchor.year}年上半年"
+        return f"{anchor.year}年"
     return _LOGS_PERIOD_LABELS[period]
 
 
@@ -2245,6 +2286,7 @@ def sync_logs_api(days: int = Query(180, ge=1, le=180)):
 @app.get("/api/logs-ranking")
 def logs_ranking(period: str = Query("month", description="month/quarter/half/year"),
                  dept: str = Query("", description="部门筛选（空=全部）"),
+                 month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                  db: Session = Depends(get_db)):
     """管理人员日志评分排名（仅名单内人员，按综合评分降序）。
     综合评估 = 五维日志质量 + 岗位职责契合 + 业绩导向 + 团队管理 + 岗位书写参考维度 → 综合评级 A/B/C/D + 综合点评。"""
@@ -2255,7 +2297,8 @@ def logs_ranking(period: str = Query("month", description="month/quarter/half/ye
                           _PERF_GROUPS, _MGMT_GROUPS)
     from manager_list import MANAGERS, MANAGER_NAMES, TITLE_MAP, get_role_keywords
 
-    start, end = _logs_period_range(period)
+    month_key = _normalize_logs_month(month)
+    start, end = _logs_period_range(period, month_key)
     q = db.query(DailyLog).filter(
         DailyLog.create_time >= start, DailyLog.create_time <= end,
         DailyLog.creator_name.in_(MANAGER_NAMES))
@@ -2322,20 +2365,23 @@ def logs_ranking(period: str = Query("month", description="month/quarter/half/ye
         p["rank"] = i if p["log_count"] > 0 else None
     return {
         "period": period,
+        "month": month_key or datetime.now().strftime("%Y-%m"),
+        "period_label": _logs_period_label(period, month_key),
         "start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d"),
         "total_logs": len(rows), "total_people": len(people),
         "people": people,
     }
 
 
-def _logs_comprehensive_payload(period: str, db: Session) -> dict:
+def _logs_comprehensive_payload(period: str, db: Session, month: Optional[str] = None) -> dict:
     """综合评估下载数据：排名摘要补齐四项评估明细，并按综合评分排序。"""
-    label = _logs_period_label(period)
-    summary = logs_ranking(period=period, dept="", db=db)
+    month_key = _normalize_logs_month(month)
+    label = _logs_period_label(period, month_key)
+    summary = logs_ranking(period=period, dept="", month=month_key, db=db)
     people = []
     for item in summary.get("people") or []:
         person = dict(item)
-        detail = logs_evaluation(name=person["name"], period=period, db=db)
+        detail = logs_evaluation(name=person["name"], period=period, month=month_key, db=db)
         person["assess"] = detail.get("assess") or {}
         person["writing_reference"] = detail.get("writing_reference") or person.get("writing_reference") or {}
         person["display_score"] = person.get("comp_score") or 0
@@ -2345,6 +2391,7 @@ def _logs_comprehensive_payload(period: str, db: Session) -> dict:
         person["rank"] = index if person.get("log_count") else None
     return {
         "period": period,
+        "month": month_key or datetime.now().strftime("%Y-%m"),
         "period_label": label,
         "board_kind": "综合评估",
         "start": summary.get("start"),
@@ -2358,6 +2405,7 @@ def _logs_comprehensive_payload(period: str, db: Session) -> dict:
 @app.get("/api/logs-evaluation")
 def logs_evaluation(name: str = Query(..., description="人员姓名"),
                     period: str = Query("month"),
+                    month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                     db: Session = Depends(get_db)):
     """单人日志评估分析报告：五维雷达 + 岗位职责深度评估（含证据）+ 多条优缺点 + 综合评级 + 深度分析建议。"""
     from manager_list import MANAGER_NAMES, TITLE_MAP, get_role_keywords, LEVEL_MAP, LEVEL_REQ
@@ -2368,8 +2416,9 @@ def logs_evaluation(name: str = Query(..., description="人员姓名"),
                           weekly_assessment,
                           _PERF_GROUPS, _MGMT_GROUPS)
     title = TITLE_MAP.get(name, "")
+    month_key = _normalize_logs_month(month)
     if name not in MANAGER_NAMES:
-        return {"name": name, "title": title, "period": period, "detail": [],
+        return {"name": name, "title": title, "period": period, "month": month_key or datetime.now().strftime("%Y-%m"), "detail": [],
                 "radar": [], "recent": [], "total": 0, "avg_score": 0, "role_fit": 0,
                 "role_hit": [], "role_miss": [], "role_detail": [],
                 "perf_focus": 0, "mgmt_focus": 0,
@@ -2381,12 +2430,12 @@ def logs_evaluation(name: str = Query(..., description="人员姓名"),
                 "grade": "", "grade_cn": "", "comment": "",
                 "strengths_list": [], "improvements_list": [],
                 "deep_strengths": [], "deep_improvements": []}
-    start, end = _logs_period_range(period)
+    start, end = _logs_period_range(period, month_key)
     rows = (db.query(DailyLog)
             .filter(DailyLog.creator_name == name, DailyLog.create_time >= start, DailyLog.create_time <= end)
             .order_by(DailyLog.create_time).all())
     if not rows:
-        return {"name": name, "title": title, "period": period, "detail": [],
+        return {"name": name, "title": title, "period": period, "month": month_key or datetime.now().strftime("%Y-%m"), "detail": [],
                 "radar": [], "recent": [], "total": 0, "avg_score": 0, "role_fit": 0,
                 "role_hit": [], "role_miss": [], "role_detail": [],
                 "perf_focus": 0, "mgmt_focus": 0,
@@ -2445,7 +2494,7 @@ def logs_evaluation(name: str = Query(..., description="人员姓名"),
     recent = [{"date": l.create_time.strftime("%Y-%m-%d"), "score": l.score_total or 0,
                "strengths": l.strengths or "", "improvements": l.improvements or ""}
               for l in rows[-3:]][::-1]
-    return {"name": name, "title": title, "period": period, "detail": detail, "radar": radar,
+    return {"name": name, "title": title, "period": period, "month": month_key or datetime.now().strftime("%Y-%m"), "detail": detail, "radar": radar,
             "recent": recent, "total": n,
             "avg_score": avg_score,
             "role_fit": role["role_fit"], "role_hit": role["role_hit"],
@@ -2767,26 +2816,30 @@ def _weekly_report_file(week: str, name: str):
     return folder / f"{safe_name}.png"
 
 
-def _comprehensive_report_file(period: str, name: str):
+def _comprehensive_report_folder(period: str, month: Optional[str] = None):
+    """Return the persisted report directory, namespaced by selected month when provided."""
+    from pathlib import Path
+
+    month_key = _normalize_logs_month(month)
+    _logs_period_label(period, month_key)
+    folder = Path(__file__).resolve().parent / "generated_reports" / "comprehensive" / period
+    if month_key:
+        folder = folder / month_key
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _comprehensive_report_file(period: str, name: str, month: Optional[str] = None):
     """Return the persisted PNG path for one manager and one comprehensive period."""
     import re
-    from pathlib import Path
 
-    _logs_period_label(period)
     safe_name = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", str(name)).strip("_") or "manager"
-    folder = Path(__file__).resolve().parent / "generated_reports" / "comprehensive" / period
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{safe_name}.png"
+    return _comprehensive_report_folder(period, month) / f"{safe_name}.png"
 
 
-def _comprehensive_ranking_report_file(period: str):
+def _comprehensive_ranking_report_file(period: str, month: Optional[str] = None):
     """Return the persisted PNG path for one comprehensive ranking board."""
-    from pathlib import Path
-
-    _logs_period_label(period)
-    folder = Path(__file__).resolve().parent / "generated_reports" / "comprehensive" / period
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder / "管理人员综合评估排名看板.png"
+    return _comprehensive_report_folder(period, month) / "管理人员综合评估排名看板.png"
 
 
 def _weekly_report_font(size: int, bold: bool = False):
@@ -3225,11 +3278,12 @@ def logs_weekly_person_images_zip(week: str = Query("", description="周标签 Y
     return Response(content=archive.getvalue(), media_type="application/zip", headers=headers)
 
 
-def _comprehensive_report_view(period: str, name: str, db: Session) -> dict:
+def _comprehensive_report_view(period: str, name: str, db: Session, month: Optional[str] = None) -> dict:
     """补充综合评估图片所需的周期文案。"""
-    label = _logs_period_label(period)
-    start, end = _logs_period_range(period)
-    report = dict(logs_evaluation(name=name, period=period, db=db))
+    month_key = _normalize_logs_month(month)
+    label = _logs_period_label(period, month_key)
+    start, end = _logs_period_range(period, month_key)
+    report = dict(logs_evaluation(name=name, period=period, month=month_key, db=db))
     report["report_kind"] = "综合评估"
     report["period_label"] = label
     report["scope_label"] = f"{label}（{start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')}）"
@@ -3239,6 +3293,7 @@ def _comprehensive_report_view(period: str, name: str, db: Session) -> dict:
 @app.get("/api/logs-comprehensive-person-image")
 def logs_comprehensive_person_image(period: str = Query("month", description="month/quarter/half/year"),
                                     name: str = Query(..., description="管理人员姓名"),
+                                    month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                                     db: Session = Depends(get_db)):
     """生成并下载单个管理人员当前综合评估周期 PNG 报告。"""
     from fastapi import HTTPException
@@ -3248,34 +3303,38 @@ def logs_comprehensive_person_image(period: str = Query("month", description="mo
     if name not in MANAGER_NAMES:
         raise HTTPException(status_code=404, detail="未找到该管理人员")
     try:
-        report = _comprehensive_report_view(period, name, db)
-        output_path = _comprehensive_report_file(period, name)
+        month_key = _normalize_logs_month(month)
+        report = _comprehensive_report_view(period, name, db, month_key)
+        output_path = _comprehensive_report_file(period, name, month_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _render_weekly_report_png(report, output_path)
-    filename = f"{name}_{period}_综合评估报告.png"
+    filename = f"{name}_{report.get('period_label') or period}_综合评估报告.png"
     return FileResponse(output_path, media_type="image/png", filename=filename)
 
 
 @app.get("/api/logs-comprehensive-ranking-image")
 def logs_comprehensive_ranking_image(period: str = Query("month", description="month/quarter/half/year"),
+                                     month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                                      db: Session = Depends(get_db)):
     """生成并下载当前综合评估周期管理人员排名看板 PNG。"""
     from fastapi import HTTPException
     from fastapi.responses import FileResponse
 
     try:
-        payload = _logs_comprehensive_payload(period, db)
-        output_path = _comprehensive_ranking_report_file(period)
+        month_key = _normalize_logs_month(month)
+        payload = _logs_comprehensive_payload(period, db, month_key)
+        output_path = _comprehensive_ranking_report_file(period, month_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _render_weekly_ranking_png(payload, output_path)
-    filename = f"{period}_管理人员综合评估排名看板.png"
+    filename = f"{payload.get('period_label') or period}_管理人员综合评估排名看板.png"
     return FileResponse(output_path, media_type="image/png", filename=filename)
 
 
 @app.get("/api/logs-comprehensive-person-images-zip")
 def logs_comprehensive_person_images_zip(period: str = Query("month", description="month/quarter/half/year"),
+                                         month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                                          db: Session = Depends(get_db)):
     """批量生成并下载当前综合评估周期每位管理人员的独立 PNG 报告。"""
     import io
@@ -3286,8 +3345,9 @@ def logs_comprehensive_person_images_zip(period: str = Query("month", descriptio
     from manager_list import MANAGER_NAMES
 
     try:
-        _logs_period_label(period)
-        payload = _logs_comprehensive_payload(period, db)
+        month_key = _normalize_logs_month(month)
+        _logs_period_label(period, month_key)
+        payload = _logs_comprehensive_payload(period, db, month_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     people = payload.get("people") or []
@@ -3301,21 +3361,22 @@ def logs_comprehensive_person_images_zip(period: str = Query("month", descriptio
             name = summary.get("name")
             if not name or name not in MANAGER_NAMES:
                 continue
-            report = _comprehensive_report_view(period, name, db)
-            output_path = _comprehensive_report_file(period, name)
+            report = _comprehensive_report_view(period, name, db, month_key)
+            output_path = _comprehensive_report_file(period, name, month_key)
             _render_weekly_report_png(report, output_path)
-            bundle.write(output_path, arcname=f"{period}/{output_path.name}")
+            bundle.write(output_path, arcname=f"{month_key or period}/{output_path.name}")
             written += 1
     if not written:
         raise HTTPException(status_code=404, detail="当前综合评估周期没有可下载的管理人员报告")
 
-    filename = f"{period}_管理人员综合评估报告.zip"
+    filename = f"{payload.get('period_label') or period}_管理人员综合评估报告.zip"
     return Response(content=archive.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
 
 
 @app.get("/api/logs-comprehensive-export")
 def logs_comprehensive_export(period: str = Query("month", description="month/quarter/half/year"),
+                              month: Optional[str] = Query(None, description="评估月份 YYYY-MM；空=当前月份"),
                               db: Session = Depends(get_db)):
     """导出当前综合评估周期的排名汇总与个人维度明细 Excel。"""
     import io
@@ -3325,7 +3386,8 @@ def logs_comprehensive_export(period: str = Query("month", description="month/qu
     from urllib.parse import quote
 
     try:
-        payload = _logs_comprehensive_payload(period, db)
+        month_key = _normalize_logs_month(month)
+        payload = _logs_comprehensive_payload(period, db, month_key)
         period_label = payload["period_label"]
     except ValueError as exc:
         from fastapi import HTTPException
