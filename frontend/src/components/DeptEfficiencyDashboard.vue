@@ -100,6 +100,9 @@
           <div>
             <div class="section-title design-section-title"><i class="ic ic-trend"></i> 设计稿件品效排名</div>
             <div class="design-performance-subtitle">{{ designPerformance.source_sheet }} · 2026年7—8月 · 单稿件成本及排名</div>
+            <div v-if="designPerformance.source_data_note" class="design-data-note">
+              <i class="ic ic-alert"></i> {{ designPerformance.source_data_note }}
+            </div>
           </div>
           <span class="design-source-tag"><i class="ic ic-link"></i> 钉钉多维表</span>
         </div>
@@ -125,15 +128,15 @@
             <div class="design-summary-grid">
               <div class="design-summary-card">
                 <span>部门整体稿件数量</span>
-                <strong>{{ fmtQuantity(activeDesignPeriod.department_quantity) }}</strong><em>份</em>
+                <strong>{{ activeDesignPeriod.data_available ? fmtQuantity(activeDesignPeriod.department_quantity) : '暂无' }}</strong><em>{{ activeDesignPeriod.data_available ? '份' : '数据' }}</em>
               </div>
               <div class="design-summary-card cost-summary">
                 <span>部门整体单稿件成本</span>
-                <strong>{{ fmtCost(activeDesignPeriod.department_unit_cost) }}</strong><em>元/份</em>
+                <strong>{{ activeDesignPeriod.data_available ? fmtCost(activeDesignPeriod.department_unit_cost) : '暂无' }}</strong><em>{{ activeDesignPeriod.data_available ? '元/份' : '数据' }}</em>
               </div>
               <div class="design-summary-card">
                 <span>参与设计师</span>
-                <strong>{{ activeDesignPeriod.designer_count }}</strong><em>人</em>
+                <strong>{{ activeDesignPeriod.data_available ? activeDesignPeriod.designer_count : '暂无' }}</strong><em>{{ activeDesignPeriod.data_available ? '人' : '数据' }}</em>
               </div>
               <div class="design-summary-card period-summary">
                 <span>当前统计周期</span>
@@ -150,12 +153,12 @@
                     <thead><tr><th>周期</th><th>稿件数量</th><th>单稿件成本</th><th>设计师数</th></tr></thead>
                     <tbody>
                       <tr v-for="period in designPeriods" :key="period.key"
-                          :class="{ selected: designPeriodKey === period.key }"
+                          :class="{ selected: designPeriodKey === period.key, 'design-period-empty-row': !period.data_available }"
                           @click="designPeriodKey = period.key">
                         <td>{{ period.label }}</td>
-                        <td>{{ fmtQuantity(period.department_quantity) }} 份</td>
-                        <td class="design-cost-cell">{{ fmtCost(period.department_unit_cost) }} 元/份</td>
-                        <td>{{ period.designer_count }} 人</td>
+                        <td>{{ period.data_available ? `${fmtQuantity(period.department_quantity)} 份` : '暂无数据' }}</td>
+                        <td class="design-cost-cell">{{ period.data_available ? `${fmtCost(period.department_unit_cost)} 元/份` : '暂无数据' }}</td>
+                        <td>{{ period.data_available ? `${period.designer_count} 人` : '—' }}</td>
                       </tr>
                     </tbody>
                   </table>
@@ -178,7 +181,7 @@
                     </tbody>
                   </table>
                 </div>
-                <div v-else class="design-empty">该周期暂无可用稿件品效数据</div>
+                <div v-else class="design-empty">{{ activeDesignPeriod.data_available ? '该周期暂无可用稿件品效数据' : `${activeDesignPeriod.label}暂无可用稿件品效数据，请补充钉钉“稿件品效”表记录` }}</div>
               </div>
             </div>
           </div>
@@ -237,17 +240,17 @@
           </div>
 
           <div class="pdd-owner-card">
-            <div class="pdd-view-title"><span class="pdd-step">2</span> {{ pddAnalysis.period }} 朱康打品与业绩分析</div>
-            <div class="pdd-ranking-basis">仅展示朱康个人分析 · {{ pddAnalysis.ranking_basis }}</div>
+            <div class="pdd-view-title"><span class="pdd-step">2</span> {{ pddAnalysis.ranking_period || pddAnalysis.period }} 全团队打品与业绩综合排名</div>
+            <div class="pdd-ranking-basis">{{ pddAnalysis.ranking_basis }} · {{ pddAnalysis.ranking_data_note }}</div>
             <div v-if="pddOwners.length" class="pdd-owner-table-wrap">
               <table class="pdd-owner-table">
                 <thead>
-                  <tr><th>排名</th><th>运营</th><th>打品质量</th><th>月销售额</th><th>利润率</th><th>ROI</th><th>综合分</th><th>状态</th></tr>
+                  <tr><th>排名</th><th>运营</th><th>打品质量</th><th>{{ pddAnalysis.ranking_period || '合并周期' }}销售额</th><th>利润率</th><th>ROI</th><th>综合分</th><th>状态</th></tr>
                 </thead>
                 <tbody>
                   <tr v-for="owner in pddOwners" :key="owner.name" :class="{ 'pdd-owner-pending': !owner.product_data_available || !owner.performance_available }">
                     <td><span class="pdd-owner-rank">{{ owner.rank || '—' }}</span></td>
-                    <td><div class="pdd-owner-person"><b>{{ owner.name }}</b><small>{{ owner.product_data_available ? `${owner.product_count}个产品` : '暂无打品记录' }}</small></div></td>
+                    <td><div class="pdd-owner-person"><b>{{ owner.name }}</b><small>{{ owner.product_data_available ? `${owner.product_count}个产品 · ${pddAnalysis.ranking_period}` : '暂无打品记录' }}</small></div></td>
                     <td><b v-if="owner.product_data_available">{{ Number(owner.success_score || 0).toFixed(1) }}%</b><span v-else>—</span><small v-if="owner.product_data_available">A {{ Number(owner.a_rate || 0).toFixed(1) }}%（{{ owner.a_count }}个） · B {{ Number(owner.b_rate || 0).toFixed(1) }}%（{{ owner.b_count }}个）</small></td>
                     <td>{{ owner.performance_available ? `${Number(owner.sales_revenue || 0).toFixed(2)}万` : '—' }}</td>
                     <td :class="Number(owner.profit_margin) < 0 ? 'pdd-negative' : ''">{{ owner.performance_available ? `${Number(owner.profit_margin || 0).toFixed(2)}%` : '—' }}</td>
@@ -258,7 +261,7 @@
                 </tbody>
               </table>
             </div>
-            <div v-else class="pdd-empty">当前周期暂无朱康打品或业绩记录</div>
+            <div v-else class="pdd-empty">当前排名周期暂无团队打品或业绩记录</div>
           </div>
 
           <div v-if="pddAnalysis.report" class="pdd-report-card">
@@ -323,7 +326,7 @@
             </template>
           </div>
 
-          <div class="pdd-analysis-note">数据口径：团队成功率按钉钉多维表的 A/B 链接数 ÷ 产品数汇总重算；综合打品成功率 = A款60% + B款40%。运营综合排名 = 打品质量分50% + 月销售额指数50%；业绩列同步展示销售额、利润率和 ROI。无完整两类数据的运营保留展示但不纳入排名。</div>
+          <div class="pdd-analysis-note">数据口径：团队成功率按钉钉多维表的 A/B 链接数 ÷ 产品数汇总重算；综合打品成功率 = A款60% + B款40%。运营综合排名按 {{ pddAnalysis.ranking_period || '合并周期' }} 的打品质量分50% + 销售额指数50%；业绩列同步展示销售额、利润率和 ROI。无完整两类数据的运营保留展示但不纳入排名。</div>
         </template>
       </section>
 
@@ -511,8 +514,8 @@ const sortedMembers = computed(() => {
 // 拼多多团队：指标圆环深蓝填充（无目标值，按用户要求整环填充）
 const isPddDept = computed(() => activeDept.value?.department === '拼多多团队')
 const pddAnalysis = computed(() => activeDept.value?.pdd_product_analysis || null)
-// 拼多多打品个人分析按当前业务要求仅保留朱康，团队指标和综合报告仍使用完整团队数据。
-const pddOwners = computed(() => (pddAnalysis.value?.owners || []).filter(owner => owner.name === '朱康'))
+  // 拼多多打品成功率按用户要求展示全团队 7—8 月合并排名。
+  const pddOwners = computed(() => pddAnalysis.value?.owners || [])
 // 设计稿件品效：固定展示用户指定的 2026 年 7—8 月，并支持季度/半年度聚合切换。
 const isProductDept = computed(() => activeDept.value?.department === '产品团队')
 const designPerformance = computed(() => activeDept.value?.design_performance || null)
@@ -961,6 +964,7 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .design-performance-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .design-section-title { border-top: 0; padding-top: 0; margin-bottom: 3px; color: #047857; }
 .design-performance-subtitle { font-size: 11px; color: #64748b; }
+.design-data-note { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 4px 8px; border-radius: 6px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; font-size: 10px; line-height: 1.5; }
 .design-source-tag { flex-shrink: 0; font-size: 10px; color: #047857; background: #d1fae5; padding: 4px 8px; border-radius: 8px; }
 .design-performance-error { margin-top: 12px; padding: 9px 12px; border-radius: 8px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; font-size: 12px; }
 .design-period-types { display: flex; gap: 6px; margin-top: 12px; }
@@ -988,6 +992,8 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .design-ranking-table th { padding: 7px 6px; color: #64748b; background: #f8fafc; border-bottom: 1px solid #e5e7eb; text-align: left; white-space: nowrap; font-weight: 600; }
 .design-ranking-table td { padding: 8px 6px; border-bottom: 1px solid #f1f5f9; color: #374151; white-space: nowrap; }
 .design-ranking-table tbody tr:hover, .design-ranking-table tbody tr.selected { background: #f0fdf4; }
+.design-ranking-table tbody tr.design-period-empty-row td { color: #94a3b8; }
+.design-ranking-table tbody tr.design-period-empty-row .design-cost-cell { color: #94a3b8 !important; font-weight: 500; }
 .design-ranking-table th:first-child, .design-ranking-table td:first-child { text-align: center; }
 .design-rank-badge { display: inline-flex; align-items: center; justify-content: center; width: 21px; height: 21px; border-radius: 50%; background: #ecfdf5; color: #047857; font-weight: 700; }
 .design-name-cell { color: #1f2937 !important; font-weight: 600; }
@@ -1036,7 +1042,7 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .pdd-owner-rate { display: flex; flex-direction: column; align-items: flex-end; }
 .pdd-owner-rate b { color: #059669; font-size: 11px; }
 .pdd-owner-rate small { color: #94a3b8; font-size: 9px; }
-.pdd-ranking-basis { margin: -2px 0 9px; color: #64748b; font-size: 10px; }
+  .pdd-ranking-basis { margin: -2px 0 9px; color: #64748b; font-size: 10px; line-height: 1.6; }
 .pdd-owner-table-wrap { overflow-x: auto; }
 .pdd-owner-table { width: 100%; border-collapse: collapse; min-width: 760px; font-size: 11px; }
 .pdd-owner-table th { padding: 8px 7px; color: #64748b; background: #f8fafc; border-bottom: 1px solid #e5e7eb; text-align: left; white-space: nowrap; font-weight: 600; }

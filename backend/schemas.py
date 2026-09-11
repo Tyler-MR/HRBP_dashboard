@@ -330,13 +330,17 @@ class PddProductAnalysis(BaseModel):
     trend_label: str = ""
     trend: List[PddProductPeriod] = []
     owners: List[PddProductOwner] = []
+    ranking_period: str = ""                   # 运营综合排名使用的合并周期
+    ranking_months: List[str] = []              # 请求的排名月份
+    ranking_months_available: List[str] = []    # 实际有打品记录的排名月份
+    ranking_data_note: str = ""                 # 排名周期覆盖说明
     team_size: int = 0
     team_sales_revenue: float = 0.0         # 万元
     team_profit: float = 0.0                # 万元
     team_profit_margin: float = 0.0         # 百分比
     team_roi: float = 0.0
     team_person_efficiency: float = 0.0     # 万元/人
-    ranking_basis: str = "综合排名 = 打品质量分50% + 月销售额指数50%"
+    ranking_basis: str = "综合排名 = 打品质量分50% + 销售额指数50%"
     report: Optional[PddProductReport] = None
     supervisor_analysis: Optional[PddSupervisorAnalysis] = None
     source: str = "dingtalk"
@@ -363,6 +367,7 @@ class DesignPerformancePeriod(BaseModel):
     department_unit_cost: Optional[float] = None
     designer_count: int = 0
     designers: List[DesignPerformanceDesigner] = []
+    data_available: bool = False
 
 
 class DesignPerformanceAnalysis(BaseModel):
@@ -372,6 +377,8 @@ class DesignPerformanceAnalysis(BaseModel):
     focus_months: List[str] = ["2026-07", "2026-08"]
     ranking_basis: str = "按单稿件成本升序；稿件数量降序作为同成本时的排序依据"
     periods: List[DesignPerformancePeriod] = []
+    available_months: List[str] = []
+    source_data_note: str = ""
     source_error: Optional[str] = None
 
 

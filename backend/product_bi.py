@@ -264,22 +264,41 @@ def _build_design_performance(records: List[dict], focus_months: tuple[str, ...]
     """构建稿件品效排名：单稿件成本=来源月薪/稿件数量，月薪金额不出现在响应中。"""
     focus = tuple(sorted(set(focus_months)))
     focus_set = set(focus)
-    rows: List[dict] = []
+    parsed_rows: List[dict] = []
     for record in records:
         fields = record.get("fields", record) if isinstance(record, dict) else {}
         month = _year_month(fields.get(DP_MONTH_FIELD))
-        if month not in focus_set:
-            continue
         quantity = _safe_number(fields.get(DP_QUANTITY_FIELD))
         salary = _safe_number(fields.get(DP_SALARY_FIELD))
-        if quantity is None or quantity <= 0 or salary is None or salary < 0:
+        if month is None or quantity is None or quantity <= 0 or salary is None or salary < 0:
             continue
-        rows.append({
-            "month": month,
+        parsed_rows.append({
+            "source_month": month,
             "designer": _extract_name(fields.get(DP_DESIGNER_FIELD)),
             "quantity": quantity,
             "salary": salary,
         })
+
+    # 兼容源表把“7月”误填成其他年份的情况：仅当目标月份没有本年记录，且
+    # 同月只有一个其他年份来源时归入看板目标月，并在 source_data_note 中明确提示。
+    source_months = sorted({row["source_month"] for row in parsed_rows})
+    month_aliases: Dict[str, str] = {}
+    for target_month in focus:
+        if target_month in source_months:
+            continue
+        candidates = [
+            source_month for source_month in source_months
+            if source_month[5:] == target_month[5:] and source_month not in focus_set
+        ]
+        if len(candidates) == 1:
+            month_aliases[candidates[0]] = target_month
+
+    rows: List[dict] = []
+    for row in parsed_rows:
+        month = month_aliases.get(row["source_month"], row["source_month"])
+        if month not in focus_set:
+            continue
+        rows.append({**row, "month": month})
 
     period_defs: List[tuple[str, str, List[str]]] = [
         ("month", month, [month]) for month in focus
@@ -343,13 +362,30 @@ def _build_design_performance(records: List[dict], focus_months: tuple[str, ...]
             department_unit_cost=department_unit_cost,
             designer_count=len(designer_rows),
             designers=designers,
+            data_available=bool(period_rows),
         ))
+
+    available_months = sorted({row["month"] for row in rows})
+    missing_months = [month for month in focus if month not in available_months]
+    note_parts: List[str] = []
+    if month_aliases:
+        mappings = "、".join(
+            f"{_month_label(source)}→{_month_label(target)}"
+            for source, target in sorted(month_aliases.items())
+        )
+        note_parts.append(f"源表月份 {mappings}（已按业务月份归入看板，请核对源表年份）")
+    if missing_months:
+        note_parts.append("缺少 " + "、".join(_month_label(month) for month in missing_months) + " 有效成本记录")
+    if not note_parts:
+        note_parts.append("已覆盖 " + "、".join(_month_label(month) for month in focus) + " 成本记录")
 
     return DesignPerformanceAnalysis(
         source_sheet=DP_SHEET_NAME,
         source_sheet_id=DESIGN_PERF_SHEET,
         focus_months=list(focus),
         periods=periods,
+        available_months=available_months,
+        source_data_note="；".join(note_parts),
     )
 
 

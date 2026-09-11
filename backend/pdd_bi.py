@@ -43,6 +43,8 @@ PDD_PRODUCT_OWNER = "运营姓名"
 PDD_PRODUCT_COUNT = "产品数"
 PDD_B_COUNT = "B款连接数（日销500元+）"
 PDD_A_COUNT = "A款链接数（日销1000元+）"
+# 用户指定：拼多多运营综合排名按 2026 年 7 月、8 月的打品与业绩合并计算。
+PDD_RANKING_MONTHS = ("2026-07", "2026-08")
 
 # 主观评价（人工主观项，非客观数据，按用户要求保留、不清空）
 # 评估维度（用户口径）：数据驱动与选品力 / 店群品效管理 / 渠道拓展与策略贡献 / 运营人效 / 抗压与执行
@@ -144,7 +146,8 @@ def _pdd_product_aggregate(rows: List[dict]) -> dict:
 def _build_pdd_product_report(period: str, summary: dict,
                               trend: List[PddProductPeriod],
                               owners: List[PddProductOwner],
-                              team_performance: Optional[Dict[str, float]] = None) -> Optional[PddProductReport]:
+                              team_performance: Optional[Dict[str, float]] = None,
+                              ranking_period: str = "") -> Optional[PddProductReport]:
     """用团队成功率、趋势、运营业绩和人效生成简洁的管理层判断。"""
     if not period or not summary.get("product_count"):
         return None
@@ -181,13 +184,13 @@ def _build_pdd_product_report(period: str, summary: dict,
         )
     if top_owner:
         highlights.append(
-            f"综合排名第一为{top_owner.name}：综合分 {top_owner.combined_score:.1f}，"
-            f"月销售额 {top_owner.sales_revenue:.2f} 万元，A/B 款成功率 {top_owner.a_rate:.1f}%/{top_owner.b_rate:.1f}%。"
+            f"{ranking_period or period}综合排名第一为{top_owner.name}：综合分 {top_owner.combined_score:.1f}，"
+            f"合并周期销售额 {top_owner.sales_revenue:.2f} 万元，A/B 款成功率 {top_owner.a_rate:.1f}%/{top_owner.b_rate:.1f}%。"
         )
 
     actions = [
         "将综合打品成功率作为团队质量指标，A款作为高质量结果指标、B款作为规模转化过程指标，按月复盘波动原因。",
-        "综合排名按打品质量分50%+月销售额指数50%计算；对排名靠后或利润率为负的运营，逐项核查选品、投放、链接维护和利润结构。",
+        f"{ranking_period or period}综合排名按打品质量分50%+销售额指数50%计算；对排名靠后或利润率为负的运营，逐项核查选品、投放、链接维护和利润结构。",
     ]
     if quality_owner and top_owner and quality_owner.name != top_owner.name:
         actions.insert(0, f"重点复盘{quality_owner.name}的打品方法，并与{top_owner.name}的销售业绩和店铺经营动作交叉验证。")
@@ -438,12 +441,13 @@ def _pdd_ai_focus(summary: dict, trend: List[PddProductPeriod],
 
 def build_pdd_product_analysis(month: Optional[str] = None,
                                performance_by_owner: Optional[Dict[str, dict]] = None,
-                               team_performance: Optional[Dict[str, float]] = None) -> PddProductAnalysis:
-    """构建拼多多打品成功率分析：团队趋势 + 当月运营综合排名 + 人效分析报告。
+                               team_performance: Optional[Dict[str, float]] = None,
+                               ranking_months: Optional[List[str]] = None) -> PddProductAnalysis:
+    """构建拼多多打品成功率分析：团队趋势 + 7—8 月运营综合排名 + 人效分析报告。
 
     成功率按链接数/产品数重算，不对多维表中的逐行占比做简单平均，避免不同产品量
     的运营被等权处理。B 款定义为日销 500 元以上，A 款定义为日销 1000 元以上。
-    performance_by_owner 来自同一统计周期的拼多多 MySQL 业绩聚合。
+    运营综合排名的打品数据与 performance_by_owner 使用同一合并周期，默认是 2026-07—2026-08。
     """
     try:
         records = _pdd_product_records()
@@ -480,6 +484,21 @@ def build_pdd_product_analysis(month: Optional[str] = None,
     period_rows = [row for row in rows if row["month"] == period]
     summary = _pdd_product_aggregate(period_rows)
 
+    requested_ranking_months = sorted(set(ranking_months or PDD_RANKING_MONTHS or (period,)))
+    ranking_rows = [row for row in rows if row["month"] in requested_ranking_months]
+    available_ranking_months = sorted({row["month"] for row in ranking_rows})
+    ranking_period = "—".join(requested_ranking_months)
+    if available_ranking_months:
+        if available_ranking_months == requested_ranking_months:
+            ranking_data_note = f"已覆盖 {ranking_period} 全部月份"
+        else:
+            ranking_data_note = (
+                f"请求周期 {ranking_period}，当前打品表实际覆盖 "
+                f"{'、'.join(available_ranking_months)}；排名按已获取月份计算"
+            )
+    else:
+        ranking_data_note = f"请求周期 {ranking_period} 暂无打品记录"
+
     by_month: Dict[str, List[dict]] = {}
     for row in rows:
         if row["month"] <= period:
@@ -494,7 +513,7 @@ def build_pdd_product_analysis(month: Optional[str] = None,
         trend_label = _trend_word(trend_delta)
 
     by_owner: Dict[str, List[dict]] = {}
-    for row in period_rows:
+    for row in ranking_rows:
         if row["owner"]:
             by_owner.setdefault(row["owner"], []).append(row)
     performance_by_owner = performance_by_owner or {}
@@ -545,13 +564,18 @@ def build_pdd_product_analysis(month: Optional[str] = None,
         trend_label=trend_label,
         trend=trend,
         owners=owners,
+        ranking_period=ranking_period,
+        ranking_months=requested_ranking_months,
+        ranking_months_available=available_ranking_months,
+        ranking_data_note=ranking_data_note,
         team_size=int(team_performance.get("team_size") or 0),
         team_sales_revenue=round(float(team_performance.get("sales_revenue") or 0), 2),
         team_profit=round(float(team_performance.get("profit") or 0), 2),
         team_profit_margin=round(float(team_performance.get("profit_margin") or 0), 2),
         team_roi=round(float(team_performance.get("roi") or 0), 2),
         team_person_efficiency=round(float(team_performance.get("person_efficiency") or 0), 2),
-        report=_build_pdd_product_report(period, summary, trend, owners, team_performance),
+        ranking_basis=f"{ranking_period}综合排名 = 打品质量分50% + 销售额指数50%",
+        report=_build_pdd_product_report(period, summary, trend, owners, team_performance, ranking_period),
         supervisor_analysis=_build_pdd_supervisor_analysis(
             period, summary, trend, owners, team_performance, product_rows=rows
         ),
@@ -612,9 +636,10 @@ def _month_aggregate(conn, month: str) -> dict:
                    "shipping": 0.0, "promotion": 0.0, "gross_profit": 0.0, "profit": 0.0}
 
 
-def _member_aggregates(conn, month: str) -> List[dict]:
-    """按负责人聚合（排除 NULL/空负责人）。"""
-    start, end = _month_range(month)
+def _member_aggregates_range(conn, start_month: str, end_month: str) -> List[dict]:
+    """按负责人聚合连续月份（排除 NULL/空负责人，跨月去重店铺/链接）。"""
+    start, _ = _month_range(start_month)
+    _, end = _month_range(end_month)
     sql = f"""
         SELECT 负责人 AS person,
                COUNT(DISTINCT 店铺名称) AS stores,
@@ -632,6 +657,11 @@ def _member_aggregates(conn, month: str) -> List[dict]:
     with conn.cursor() as cur:
         cur.execute(sql, (start, end))
         return cur.fetchall() or []
+
+
+def _member_aggregates(conn, month: str) -> List[dict]:
+    """按负责人聚合单月（排除 NULL/空负责人）。"""
+    return _member_aggregates_range(conn, month, month)
 
 
 def _derive_score(agg: dict) -> float:
@@ -734,6 +764,9 @@ def build_pdd_dept(month: Optional[str] = None) -> DeptEfficiency:
             prev = _month_aggregate(conn, prev_month)
             members_raw = _member_aggregates(conn, cur_month)
             members_prev = _member_aggregates(conn, prev_month)
+            ranking_members_raw = _member_aggregates_range(
+                conn, PDD_RANKING_MONTHS[0], PDD_RANKING_MONTHS[-1]
+            )
         finally:
             conn.close()
     except TaobaoDBError as e:
@@ -778,7 +811,25 @@ def build_pdd_dept(month: Optional[str] = None) -> DeptEfficiency:
     ]
 
     members: List[DeptMember] = []
+    # 排名业绩与打品成功率统一使用 2026-07—2026-08 合并口径；店铺数/链接数由 SQL 跨月去重。
     performance_by_owner: Dict[str, dict] = {}
+    ranked_for_ranking = sorted(ranking_members_raw, key=lambda r: r["revenue"], reverse=True)
+    max_ranking_revenue = ranked_for_ranking[0]["revenue"] if ranked_for_ranking else 0.0
+    for r in ranked_for_ranking:
+        if not _roster_active(r["person"]):
+            continue
+        rev_wan = r["revenue"] / 10000.0
+        owner_profit_pct = r["profit"] / r["revenue"] * 100 if r["revenue"] else 0.0
+        owner_roi = r["revenue"] / r["promotion"] if r["promotion"] else 0.0
+        performance_by_owner[r["person"]] = {
+            "performance_score": min(100.0, r["revenue"] / max_ranking_revenue * 100)
+            if max_ranking_revenue else 0.0,
+            "sales_revenue": rev_wan,
+            "profit": r["profit"] / 10000.0,
+            "profit_margin": owner_profit_pct,
+            "roi": owner_roi,
+            "stores": r["stores"],
+        }
     ranked = sorted(members_raw, key=lambda r: r["revenue"], reverse=True)
     max_rev = ranked[0]["revenue"] if ranked else 0.0
     for r in ranked:
@@ -789,14 +840,6 @@ def build_pdd_dept(month: Optional[str] = None) -> DeptEfficiency:
         profit_wan = r["profit"] / 10000.0
         owner_profit_pct = r["profit"] / r["revenue"] * 100 if r["revenue"] else 0.0
         owner_roi = r["revenue"] / r["promotion"] if r["promotion"] else 0.0
-        performance_by_owner[r["person"]] = {
-            "performance_score": min(100.0, r["revenue"] / max_rev * 100) if max_rev else 0.0,
-            "sales_revenue": rev_wan,
-            "profit": profit_wan,
-            "profit_margin": profit_pct,
-            "roi": owner_roi,
-            "stores": r["stores"],
-        }
         members.append(DeptMember(
             name=r["person"],
             position=_MEMBER_POSITIONS.get(r["person"], "运营专员"),  # 岗位按人事配置
@@ -846,6 +889,7 @@ def build_pdd_dept(month: Optional[str] = None) -> DeptEfficiency:
                 "roi": roi,
                 "person_efficiency": person_eff,
             },
+            list(PDD_RANKING_MONTHS),
         ),
         source="pdd",
         source_error=None,
