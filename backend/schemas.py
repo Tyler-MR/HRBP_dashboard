@@ -282,6 +282,7 @@ class PddProductReport(BaseModel):
     conclusion: str = ""
     highlights: List[str] = []
     actions: List[str] = []
+    source_note: str = ""                 # 综合评估的数据源与刷新口径
 
 
 class PddSupervisorBrief(BaseModel):
@@ -401,6 +402,8 @@ class DeptEfficiency(BaseModel):
     design_performance: Optional[DesignPerformanceAnalysis] = None
     source: Optional[str] = None          # 数据源标识: "mysql"=淘宝BI实时数据
     source_error: Optional[str] = None    # 数据源异常提示（如 MySQL 连接失败已重试）
+    dingtalk_sync_at: Optional[str] = None  # 产品/设计钉钉多维表最近一次成功同步时间
+    dingtalk_data_note: str = ""            # 产品/设计数据来源与刷新策略说明
 
 
 class DeptEfficiencyResponse(BaseModel):

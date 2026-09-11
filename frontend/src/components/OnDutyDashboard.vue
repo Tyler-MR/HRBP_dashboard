@@ -26,6 +26,14 @@
       <em>实际人均在岗仍按钉钉数据统计，基线用于判断超出或不足</em>
     </div>
 
+    <template v-if="!loading && stats.depts?.length">
+      <div class="section-title ranking-hero-title"><i class="ic ic-rank ic-green"></i> 部门人均在岗时长排行（{{ monthLabel }}）</div>
+      <div class="chart-panel ranking-hero-panel">
+        <div class="ranking-hero-note">按部门平均在岗时长从高到低展示，打开看板即可查看当前部门排名。</div>
+        <div ref="barEl" class="chart-box"></div>
+      </div>
+    </template>
+
     <!-- 家清垂类电商经营分析报告：先结论，再证据与动作 -->
     <section v-if="!loading && stats.analysis_report" class="analysis-report" :class="'status-' + stats.analysis_report.status">
       <div class="analysis-head">
@@ -105,7 +113,7 @@
                   </template>
                   <span v-else>—</span>
                 </td>
-                <td><span class="linkage-status">{{ row.status }}</span></td>
+                <td><span :class="['linkage-status', { 'linkage-status-pending': row.status === '产出数据不足' }]">{{ row.status }}</span></td>
                 <td>{{ row.coverage }}</td>
                 <td class="linkage-analysis">{{ row.analysis }}<small>{{ row.data_note }}</small></td>
               </tr>
@@ -191,7 +199,7 @@
       </div>
 
       <details class="analysis-details">
-        <summary>查看指标口径与待补充数据</summary>
+        <summary>查看指标口径与数据不足项</summary>
         <div class="analysis-detail-grid">
           <div><b>指标口径</b><ul><li v-for="(definition, i) in stats.analysis_report.definitions" :key="'d' + i">{{ definition }}</li></ul></div>
           <div><b>下周期建议补充</b><ul><li v-for="(question, i) in stats.analysis_report.questions" :key="'q' + i">{{ question }}</li></ul></div>
@@ -212,37 +220,26 @@
         </div>
       </div>
 
-      <!-- 部门在岗时长排行 -->
-      <div class="section-title"><i class="ic ic-rank ic-green"></i> 部门人均在岗时长排行（{{ monthLabel }}）</div>
-      <div class="chart-panel">
-        <div ref="barEl" class="chart-box"></div>
-      </div>
-      <div class="section-title"><i class="ic ic-rank ic-indigo"></i> 部门人均上下班打卡时间</div>
-      <div class="chart-panel">
-        <div ref="clockEl" class="chart-box"></div>
-      </div>
-
       <!-- 部门详情表 -->
-      <div class="section-title"><i class="ic ic-rank ic-indigo"></i> 部门统计明细</div>
+      <div class="section-title"><i class="ic ic-rank ic-indigo"></i> 部门人均在岗时长排名明细（从高到低）</div>
       <div class="rank-table-wrap">
         <table class="rank-table">
           <thead>
             <tr>
-              <th>部门</th><th>一级部门</th><th>人数</th><th>人均在岗时长</th><th>较标准基线</th>
-              <th>人均上班打卡</th><th>人均下班打卡</th><th>部门成员（点部门筛选）</th>
+              <th>排名</th><th>部门</th><th>一级部门</th><th>人数</th><th>人均在岗时长</th><th>较标准基线</th>
+              <th>部门成员（点部门筛选）</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="d in stats.depts" :key="d.dept"
+            <tr v-for="(d, index) in stats.depts" :key="d.dept"
                 :class="['rank-row', { selected: filterDept === d.dept }]"
                 @click="filterDept = filterDept === d.dept ? '' : d.dept">
+              <td class="rank-number">{{ index + 1 }}</td>
               <td class="name-cell">{{ d.dept }}</td>
               <td>{{ d.l1 }}</td>
               <td>{{ d.count }}</td>
               <td class="score-cell"><b>{{ d.avg_onduty.display }}</b></td>
               <td :class="baselineCls(d)"><b>{{ d.baseline_delta?.display || '—' }}</b></td>
-              <td>{{ d.avg_on.display || '—' }}</td>
-              <td>{{ d.avg_off.display || '—' }}</td>
               <td class="tip-cell">{{ d.persons.map(p => p.name).join('、') }}</td>
             </tr>
           </tbody>
@@ -251,27 +248,38 @@
 
       <!-- 个人明细 -->
       <div class="section-title">
-        <i class="ic ic-rank ic-green"></i> 个人平均在岗明细
+        <i class="ic ic-rank ic-green"></i> 个人平均在岗排名（部门第一名突出）
         <select v-model="filterDept" class="mini-select">
           <option value="">全部部门</option>
           <option v-for="d in stats.depts" :key="d.dept" :value="d.dept">{{ d.dept }}</option>
         </select>
       </div>
+      <div class="personal-rank-note">每个部门仅突出平均在岗时长第一名；其余人员按在岗时长从高到低以简表列出。</div>
       <div class="rank-table-wrap">
-        <table class="rank-table">
+        <table class="rank-table personal-rank-table">
           <thead>
-            <tr><th>部门</th><th>姓名</th><th>岗位</th><th>平均上班</th><th>平均下班</th><th>平均在岗</th><th>部门人均在岗</th><th>与部门人均差</th></tr>
+            <tr><th>部门</th><th>第一名（突出展示）</th><th>平均在岗</th><th>与部门人均差</th><th>其他人员排名（按在岗时长）</th></tr>
           </thead>
           <tbody>
-            <tr v-for="p in filteredPersons" :key="p.dept + p.name">
-              <td>{{ p.dept }}</td>
-              <td class="name-cell">{{ p.name }}</td>
-              <td>{{ p.position }}</td>
-              <td>{{ p.on_time.display }}</td>
-              <td>{{ p.off_time.display }}</td>
-              <td class="score-cell"><b>{{ p.onduty.display }}</b></td>
-              <td>{{ p.dept_onduty.display }}</td>
-              <td :class="diffCls(p)">{{ diffText(p) }}</td>
+            <tr v-for="group in personalRankings" :key="group.dept" class="personal-rank-row">
+              <td class="name-cell">{{ group.dept }}<small>{{ group.count }}人</small></td>
+              <td>
+                <div v-if="group.leader" class="leader-person">
+                  <span class="leader-badge">第1名</span>
+                  <div><b>{{ group.leader.name }}</b><small>{{ group.leader.position }}</small></div>
+                </div>
+                <span v-else>—</span>
+              </td>
+              <td class="score-cell"><b>{{ group.leader?.onduty.display || '—' }}</b></td>
+              <td :class="group.leader ? diffCls(group.leader) : ''">{{ group.leader ? diffText(group.leader) : '—' }}</td>
+              <td>
+                <div v-if="group.others.length" class="compact-person-list">
+                  <span v-for="person in group.others" :key="person.name">
+                    第{{ person.rank }}名 {{ person.name }}（{{ person.onduty.display }}）
+                  </span>
+                </div>
+                <span v-else class="muted-text">无其他人员</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -298,11 +306,8 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts'
 
-const INDIGO = '#4f46e5'
 const GREEN = '#059669'
-const STANDARD_START_MINUTES = 9 * 60 + 15
-const STANDARD_END_MINUTES = 18 * 60 + 30
-const STANDARD_ONDUTY_MINUTES = STANDARD_END_MINUTES - STANDARD_START_MINUTES
+const STANDARD_ONDUTY_MINUTES = (18 * 60 + 30) - (9 * 60 + 15)
 
 const stats = ref({ depts: [], overview: {}, suggestions: [], months: [] })
 const month = ref('')
@@ -312,17 +317,23 @@ const error = ref('')
 const updatedAt = ref('')
 const filterDept = ref('')
 const barEl = ref(null)
-const clockEl = ref(null)
 let barChart = null
-let clockChart = null
 
 const monthLabel = computed(() => (month.value || '').replace('-', '年') + '月')
 
-const filteredPersons = computed(() => {
-  const all = (stats.value.depts || []).flatMap(d =>
-    (d.persons || []).map(p => ({ ...p, dept: d.dept })))
-  return filterDept.value ? all.filter(p => p.dept === filterDept.value) : all
-})
+const personalRankings = computed(() => (stats.value.depts || [])
+  .filter(d => !filterDept.value || d.dept === filterDept.value)
+  .map(d => {
+    const ranked = [...(d.persons || [])]
+      .sort((a, b) => (b.onduty?.minutes ?? -1) - (a.onduty?.minutes ?? -1))
+      .map((person, index) => ({ ...person, rank: index + 1 }))
+    return {
+      dept: d.dept,
+      count: d.count,
+      leader: ranked[0] || null,
+      others: ranked.slice(1),
+    }
+  }))
 
 const fmtMin = (m) => m == null ? '' : `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
 const diffText = (p) => {
@@ -386,7 +397,7 @@ function applyStatsData(data) {
 }
 
 function renderCharts() {
-  if (!barEl.value || !clockEl.value || !stats.value.depts?.length) return
+  if (!barEl.value || !stats.value.depts?.length) return
   const depts = stats.value.depts
 
   // 部门人均在岗时长排行（横向柱状）
@@ -420,40 +431,10 @@ function renderCharts() {
     }],
   })
 
-  // 部门人均上下班打卡时间（分组横向）
-  clockChart = clockChart || echarts.init(clockEl.value)
-  clockChart.setOption({
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    legend: { data: ['人均上班打卡', '人均下班打卡'], right: 10, top: 0 },
-    grid: { left: 90, right: 60, top: 30, bottom: 24 },
-    xAxis: {
-      type: 'value',
-      axisLabel: { formatter: (v) => fmtMin(v) },
-      splitLine: { lineStyle: { color: '#f3f4f6' } },
-    },
-    yAxis: { type: 'category', data: depts.map(d => d.dept), inverse: true, axisLabel: { color: '#1a1a2e' } },
-    series: [
-      {
-        name: '人均上班打卡', type: 'bar', data: depts.map(d => d.avg_on.minutes), barWidth: 12,
-        itemStyle: { color: INDIGO, borderRadius: [0, 6, 6, 0] },
-        markLine: {
-          silent: true, symbol: 'none',
-          lineStyle: { color: '#d97706', type: 'dashed', width: 1.5 },
-          label: { show: true, formatter: '上班 09:15 / 下班 18:30', color: '#b45309', fontSize: 10 },
-          data: [{ xAxis: STANDARD_START_MINUTES }, { xAxis: STANDARD_END_MINUTES }],
-        },
-      },
-      {
-        name: '人均下班打卡', type: 'bar', data: depts.map(d => d.avg_off.minutes), barWidth: 12,
-        itemStyle: { color: GREEN, borderRadius: [0, 6, 6, 0] },
-      },
-    ],
-  })
 }
 
 function onResize() {
   barChart?.resize()
-  clockChart?.resize()
 }
 
 onMounted(() => {
@@ -464,7 +445,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
   barChart?.dispose()
-  clockChart?.dispose()
 })
 </script>
 
@@ -529,6 +509,7 @@ onBeforeUnmount(() => {
 .linkage-table small { display: block; color: #94a3b8; font-size: 10px; line-height: 1.45; white-space: normal; }
 .linkage-dept b { color: #1e293b; }
 .linkage-status { display: inline-block; color: #0f766e; background: #ccfbf1; border-radius: 20px; padding: 3px 7px; white-space: nowrap; font-size: 11px; font-weight: 600; }
+.linkage-status-pending { color: #a16207; background: #fef3c7; }
 .linkage-analysis { min-width: 300px; color: #475569 !important; }
 .linkage-person-section { margin-top: 16px; }
 .linkage-person-note { color: #64748b; font-size: 11px; line-height: 1.6; margin: -3px 0 8px; }
@@ -584,6 +565,9 @@ onBeforeUnmount(() => {
 
 .chart-panel { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.05); margin-bottom: 4px; }
 .chart-box { height: 380px; }
+.ranking-hero-title { margin-top: 16px; }
+.ranking-hero-panel { margin-bottom: 18px; }
+.ranking-hero-note { color: #64748b; font-size: 12px; margin: 0 0 8px; }
 
 .rank-table-wrap { background: #fff; border-radius: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.05); overflow-x: auto; }
 .rank-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -592,9 +576,22 @@ onBeforeUnmount(() => {
 .rank-row { cursor: pointer; }
 .rank-row:hover { background: #f5f7ff; }
 .rank-row.selected { background: #eef2ff; }
+.rank-number { width: 46px; color: #4f46e5; font-weight: 800; text-align: center; }
 .name-cell { font-weight: 600; color: #1a1a2e; }
+.name-cell small { display: block; color: #94a3b8; font-size: 10px; font-weight: 400; margin-top: 2px; }
 .score-cell b { font-size: 15px; color: #4f46e5; }
 .tip-cell { white-space: normal; line-height: 1.5; font-size: 12px; min-width: 200px; }
+
+.personal-rank-note { color: #64748b; font-size: 12px; margin: -4px 0 8px; }
+.personal-rank-table { min-width: 760px; }
+.personal-rank-row { vertical-align: top; }
+.leader-person { display: flex; align-items: center; gap: 8px; min-width: 145px; }
+.leader-person b { display: block; color: #1e293b; }
+.leader-person small { display: block; color: #94a3b8; font-size: 10px; margin-top: 2px; }
+.leader-badge { flex: 0 0 auto; color: #92400e; background: #fef3c7; border: 1px solid #fcd34d; border-radius: 999px; padding: 3px 7px; font-size: 11px; font-weight: 800; }
+.compact-person-list { display: flex; flex-wrap: wrap; gap: 6px 10px; min-width: 300px; white-space: normal; line-height: 1.5; }
+.compact-person-list span { color: #475569; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 3px 7px; font-size: 12px; }
+.muted-text { color: #94a3b8; font-size: 12px; }
 
 .diff-ok { color: #8b8fa8; }
 .diff-high { color: #dc2626; font-weight: 600; }

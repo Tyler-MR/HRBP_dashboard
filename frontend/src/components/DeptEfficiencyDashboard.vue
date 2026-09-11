@@ -41,6 +41,12 @@
         </div>
       </div>
 
+      <div v-if="isProductDept && activeDept.dingtalk_data_note" class="dingtalk-data-status">
+        <i class="ic ic-link"></i>
+        <span>{{ activeDept.dingtalk_data_note }}</span>
+        <span v-if="activeDept.dingtalk_sync_at" class="dingtalk-sync-time">最近同步 {{ activeDept.dingtalk_sync_at }}</span>
+      </div>
+
       <div v-if="activeDept.source_error" class="source-error">
         <i class="ic ic-alert"></i> 数据源连接失败，已自动重试 3 次仍未成功。为避免展示虚假数据，本部门指标与成员暂不显示，请检查数据源后点击刷新。
       </div>
@@ -265,8 +271,9 @@
           </div>
 
           <div v-if="pddAnalysis.report" class="pdd-report-card">
-            <div class="pdd-view-title"><span class="pdd-step">3</span> 打品成功率 × 人效综合分析报告</div>
+            <div class="pdd-view-title"><span class="pdd-step">3</span> {{ pddAnalysis.period || month }} 打品成功率 × 实时经营综合评估</div>
             <div class="pdd-report-headline">{{ pddAnalysis.report.headline }}</div>
+            <div v-if="pddAnalysis.report.source_note" class="pdd-report-source"><i class="ic ic-link"></i> {{ pddAnalysis.report.source_note }}</div>
             <p class="pdd-report-conclusion">{{ pddAnalysis.report.conclusion }}</p>
             <div class="pdd-report-grid">
               <div><div class="pdd-report-label">关键判断</div><ul><li v-for="item in pddAnalysis.report.highlights" :key="item">{{ item }}</li></ul></div>
@@ -923,6 +930,8 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .month-label { font-size: 12px; color: #555; display: flex; align-items: center; gap: 4px; }
 .month-picker { padding: 3px 6px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 12px; color: #374151; background: #fff; cursor: pointer; }
 .loading-tip { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 60px 0; color: #6b7280; font-size: 14px; }
+.dingtalk-data-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: -4px 0 14px; padding: 8px 12px; border: 1px solid #bfdbfe; border-radius: 8px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
+.dingtalk-sync-time { color: #475569; margin-left: auto; }
 .loading-tip .spinner { width: 18px; height: 18px; border: 3px solid #e0e7ff; border-top-color: #4f46e5; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .month-picker:focus { border-color: #4f46e5; outline: none; box-shadow: 0 0 0 2px rgba(79,70,229,0.15); }
@@ -1063,6 +1072,7 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .pdd-report-card { margin-top: 12px; padding: 12px; border-radius: 9px; border: 1px solid #d1fae5; background: #f0fdf4; }
 .pdd-report-card .pdd-view-title { margin-top: 0; }
 .pdd-report-headline { color: #065f46; font-size: 13px; font-weight: 700; line-height: 1.5; }
+.pdd-report-source { margin-top: 4px; color: #047857; font-size: 10px; line-height: 1.6; }
 .pdd-report-conclusion { margin: 6px 0 10px; color: #374151; font-size: 11px; line-height: 1.7; }
 .pdd-report-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .pdd-report-label { color: #047857; font-size: 11px; font-weight: 700; }

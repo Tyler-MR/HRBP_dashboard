@@ -156,6 +156,28 @@ def refresh_product_cache() -> dict:
     }
 
 
+def _dingtalk_data_status() -> dict:
+    """返回产品/设计三张钉钉表最近一次成功同步状态。
+
+    页面查询继续使用 24 小时缓存，避免每次打开看板都读取钉钉；
+    凌晨自动同步和前端手动同步都会更新这里的时间戳。
+    """
+    with _cache_lock:
+        timestamps = [
+            _cache["ts"].get(PRODUCT_SHEET, 0),
+            _cache["ts"].get(DESIGN_SHEET, 0),
+            _cache["ts"].get(DESIGN_PERF_SHEET, 0),
+        ]
+    latest = max(timestamps, default=0)
+    return {
+        "dingtalk_sync_at": datetime.fromtimestamp(latest).strftime("%Y-%m-%d %H:%M:%S") if latest else None,
+        "dingtalk_data_note": (
+            "产品进度、设计每日稿件、稿件品效均来自钉钉多维表；"
+            "普通查询使用24小时缓存，每日00:05自动刷新，点击同步按钮立即刷新。"
+        ),
+    }
+
+
 def _parse_month(val: Any) -> Optional[int]:
     """日期值 → 月份 int。支持毫秒时间戳 / text "8月27日" / 'YYYY-MM-DD' / 'YYYY/MM/DD'。"""
     if val is None:
@@ -431,7 +453,7 @@ def _error_dept(msg: str) -> DeptEfficiency:
     return DeptEfficiency(
         department="产品团队", team_size=0, score=None,
         metrics=[], members=[], subjective=_SUBJECTIVE,
-        source="dingtalk", source_error=str(msg),
+        source="dingtalk", source_error=str(msg), **_dingtalk_data_status(),
     )
 
 
@@ -644,4 +666,5 @@ def build_product_dept(month: Optional[str] = None) -> DeptEfficiency:
         design_performance=design_performance,
         source="dingtalk",
         source_error=None,
+        **_dingtalk_data_status(),
     )

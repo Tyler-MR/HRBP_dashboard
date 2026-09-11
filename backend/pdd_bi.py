@@ -148,11 +148,13 @@ def _build_pdd_product_report(period: str, summary: dict,
                               owners: List[PddProductOwner],
                               team_performance: Optional[Dict[str, float]] = None,
                               ranking_period: str = "") -> Optional[PddProductReport]:
-    """用团队成功率、趋势、运营业绩和人效生成简洁的管理层判断。"""
+    """用打品质量与 8 月实时经营结果生成管理层综合判断。"""
     if not period or not summary.get("product_count"):
         return None
 
     quality_score = summary["success_rate"]
+    team_performance = team_performance or {}
+    realtime_available = bool(team_performance.get("team_size"))
     if len(trend) >= 2:
         previous, current = trend[-2], trend[-1]
         success_delta = current.success_rate - previous.success_rate
@@ -171,40 +173,66 @@ def _build_pdd_product_report(period: str, summary: dict,
     quality_owner = max(owners, key=lambda item: item.success_score) if owners else None
     profit_owners = [item for item in owners if item.performance_available]
     negative_profit = [item for item in profit_owners if item.profit_margin < 0]
+    sales_owner = max(profit_owners, key=lambda item: item.sales_revenue) if profit_owners else None
     highlights = [
         f"团队本期完成 {summary['product_count']} 个产品，综合打品成功率 {quality_score:.1f}%（A款 {summary['a_rate']:.1f}%×60% + B款 {summary['b_rate']:.1f}%×40%）。",
-        trend_text,
     ]
-    team_performance = team_performance or {}
-    if team_performance.get("person_efficiency") is not None:
+    if realtime_available:
         highlights.append(
-            f"团队月销售额 {team_performance.get('sales_revenue', 0):.2f} 万元，"
-            f"人效 {team_performance.get('person_efficiency', 0):.2f} 万元/人，"
+            f"{period} 实时经营数据：销售额 {team_performance.get('sales_revenue', 0):.2f} 万元，"
+            f"{int(team_performance.get('team_size') or 0)} 人，人效 {team_performance.get('person_efficiency', 0):.2f} 万元/人，"
             f"利润率 {team_performance.get('profit_margin', 0):.2f}%，ROI {team_performance.get('roi', 0):.2f}。"
         )
+    else:
+        highlights.append(f"{period} MySQL 实时经营数据暂未返回，当前只能评估打品质量，不能完成经营结果判断。")
+    highlights.append(trend_text)
     if top_owner:
         highlights.append(
             f"{ranking_period or period}综合排名第一为{top_owner.name}：综合分 {top_owner.combined_score:.1f}，"
             f"合并周期销售额 {top_owner.sales_revenue:.2f} 万元，A/B 款成功率 {top_owner.a_rate:.1f}%/{top_owner.b_rate:.1f}%。"
         )
+    if quality_owner and sales_owner and quality_owner.name != sales_owner.name:
+        highlights.append(
+            f"质量与销售头部不一致：打品成功率最高为{quality_owner.name}，实时销售额最高为{sales_owner.name}，"
+            "需分别复盘选品质量与经营转化，避免用单一指标定性。"
+        )
 
     actions = [
-        "将综合打品成功率作为团队质量指标，A款作为高质量结果指标、B款作为规模转化过程指标，按月复盘波动原因。",
-        f"{ranking_period or period}综合排名按打品质量分50%+销售额指数50%计算；对排名靠后或利润率为负的运营，逐项核查选品、投放、链接维护和利润结构。",
+        f"{period}复盘同时看综合成功率、销售额、人效、利润率和 ROI；A款作为质量门槛，B款作为规模转化指标，不以成功率单项定性。",
     ]
-    if quality_owner and top_owner and quality_owner.name != top_owner.name:
-        actions.insert(0, f"重点复盘{quality_owner.name}的打品方法，并与{top_owner.name}的销售业绩和店铺经营动作交叉验证。")
+    if quality_owner and sales_owner and quality_owner.name != sales_owner.name:
+        actions.append(f"重点对照{quality_owner.name}的打品质量与{sales_owner.name}的实时销售转化，拆分选品、投放、链接维护和利润结构。")
     if negative_profit:
-        actions.append(f"当前有{len(negative_profit)}名运营出现负利润率，建议将利润和 ROI 纳入下一轮打品复盘。")
+        actions.append(f"当前有{len(negative_profit)}名运营出现负利润率，建议将利润和 ROI 设为打品验收的必要条件。")
+    actions.append(f"{ranking_period or period}综合排名按打品质量分50%+销售额指数50%计算；排名靠后人员需结合实时经营结果逐项复盘。")
+
+    if realtime_available:
+        conclusion = (
+            f"综合评估基于{period}钉钉打品数据与 MySQL 实时经营数据：综合打品成功率 {quality_score:.1f}%，"
+            f"销售额 {team_performance.get('sales_revenue', 0):.2f} 万元，人效 {team_performance.get('person_efficiency', 0):.2f} 万元/人，"
+            f"利润率 {team_performance.get('profit_margin', 0):.2f}%，ROI {team_performance.get('roi', 0):.2f}。"
+            "当前应同时关注打品质量、规模产出和利润转化，单看成功率无法代表经营质量。"
+            f"{trend_text}"
+        )
+    else:
+        conclusion = (
+            f"{period}已获得钉钉打品数据，但 MySQL 实时经营数据暂缺，暂不能判断销售、人效、利润和投产质量。"
+            "请恢复实时经营数据后再做完整综合评估。"
+        )
 
     return PddProductReport(
-        headline=f"{period}团队综合打品成功率 {quality_score:.1f}%：人效 {team_performance.get('person_efficiency', 0):.2f} 万元/人。",
-        conclusion=(
-            f"团队当前综合打品成功率为{quality_score:.1f}%，应结合人效、利润率和ROI判断增长质量；"
-            f"排名同时看打品质量与销售业绩，不能用单一成功率替代经营结果。{trend_text}"
+        headline=(
+            f"{period}实时综合评估：打品成功率 {quality_score:.1f}% · "
+            f"人效 {team_performance.get('person_efficiency', 0):.2f} 万元/人"
+            if realtime_available else f"{period}综合打品成功率 {quality_score:.1f}%：实时经营数据待补齐"
         ),
+        conclusion=conclusion,
         highlights=highlights,
         actions=actions[:3],
+        source_note=(
+            f"打品质量：钉钉多维表「{PDD_PRODUCT_SHEET_NAME}」（每日 00:05 更新，可手动同步）；"
+            f"{period}销售额、人效、利润率、ROI：MySQL 实时查询。"
+        ),
     )
 
 
