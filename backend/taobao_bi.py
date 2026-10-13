@@ -104,12 +104,19 @@ def _latest_month(conn: pymysql.Connection) -> Tuple[str, str]:
     return cur_month, prev_month
 
 
+def _previous_month(month: str) -> str:
+    """返回指定月份的上一个自然月。"""
+    start, _ = _month_range(month)
+    return (start - timedelta(days=1)).strftime("%Y-%m")
+
+
 def _month_aggregate(conn: pymysql.Connection, month: str) -> dict:
     """单月整体聚合（部门口径：全表行均属淘宝团队经营，不做 person 过滤；
     公司汇总行仅影响成员/人数统计，不影响经营额）。"""
     start, end = _month_range(month)
     sql = f"""
         SELECT
+            COUNT(*) AS records,
             COUNT(DISTINCT store_name) AS stores,
             COALESCE(SUM(revenue), 0)  AS revenue,
             COALESCE(SUM(orders), 0)   AS orders,
@@ -123,7 +130,7 @@ def _month_aggregate(conn: pymysql.Connection, month: str) -> dict:
     with conn.cursor() as cur:
         cur.execute(sql, (start, end))
         row = cur.fetchone()
-    return row or {"stores": 0, "revenue": 0.0, "orders": 0.0,
+    return row or {"records": 0, "stores": 0, "revenue": 0.0, "orders": 0.0,
                    "refund_rate": 0.0, "gross_margin": 0.0, "promotion": 0.0, "platform_profit": 0.0}
 
 
@@ -203,12 +210,14 @@ def _error_dept(msg: str) -> DeptEfficiency:
     )
 
 
-def build_taobao_dept() -> DeptEfficiency:
-    """构建淘宝团队人效数据（MySQL 实时）。连接失败重试 3 次后返回 source_error 空数据。"""
+def build_taobao_dept(month: Optional[str] = None) -> DeptEfficiency:
+    """构建淘宝团队人效数据（MySQL 实时）。month 为空时使用表内最新月份。"""
     try:
         conn = _connect()
         try:
-            cur_month, prev_month = _latest_month(conn)
+            latest_month, latest_prev_month = _latest_month(conn)
+            cur_month = month or latest_month
+            prev_month = _previous_month(cur_month) if month else latest_prev_month
             agg = _month_aggregate(conn, cur_month)
             prev = _month_aggregate(conn, prev_month)
             members_raw = _member_aggregates(conn, cur_month)
@@ -278,6 +287,8 @@ def build_taobao_dept() -> DeptEfficiency:
         metrics=metrics,
         members=members,
         subjective=_SUBJECTIVE,
+        data_period=cur_month,
+        data_available=bool(agg.get("records")),
         source="mysql",
         source_error=None,
     )

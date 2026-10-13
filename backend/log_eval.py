@@ -173,6 +173,22 @@ _MGMT_GROUPS = [  # 团队管理（队/培/配/考/员）
     ("人员管理", ["招聘", "入职", "离职", "出勤", "请假", "辞退"]),
 ]
 
+# 业务副总情境指标：人员缺口本身不是加分项，只有背景 + 实际承接动作 + 可量化结果
+# 三项证据同时出现在日志中，才计入「人员缺口下沉承接与结果」维度。
+_BUSINESS_VP_CONTEXT_DIMENSION = "人员缺口下沉承接与结果"
+_BUSINESS_VP_BACKGROUND_WORDS = (
+    "人员不足", "人员缺口", "人员缺失", "人手不足", "缺员", "缺岗", "空岗", "岗位空缺",
+    "承接人员不足", "承接人员缺失", "编制不足",
+)
+_BUSINESS_VP_ACTION_WORDS = (
+    "目标下沉", "下沉业务", "业务下沉", "实际执行", "一线承担", "直接承担", "亲自负责",
+    "亲自跟进", "代岗", "补位", "兼任", "临时承接", "接手", "代行",
+)
+_BUSINESS_VP_RESULT_WORDS = (
+    "销售额", "gmv", "利润", "毛利", "订单", "销量", "转化率", "roi", "投产", "完成率",
+    "达成率", "发货", "交付", "成本", "退款率", "产出",
+)
+
 
 def evaluate_industry_focus(text: str, groups: list) -> int:
     """电商行业要求维度：命中词族数 / 5 × 20。"""
@@ -622,10 +638,31 @@ def evaluate_writing_reference(text: str, title: str = "", name: str = "") -> di
     t = _clean(text or "")
     tl = t.lower()
     detail, hit, miss = [], [], []
+
+    def has_numbered_indicator(word: str) -> bool:
+        """Require a metric keyword and a number in the same log line."""
+        return any(word.lower() in line.lower() and re.search(r"\d", line)
+                   for line in t.splitlines())
+
     for dimension, words in dimensions:
-        covered = bool(tl) and any(word.lower() in tl for word in words)
-        item = {"name": dimension, "covered": covered,
-                "evidence": _evidence(t, words) if covered else ""}
+        is_business_vp_context = (
+            template.get("key") == "胡总" and dimension == _BUSINESS_VP_CONTEXT_DIMENSION
+        )
+        if is_business_vp_context:
+            background = next((word for word in _BUSINESS_VP_BACKGROUND_WORDS if word.lower() in tl), "")
+            action = next((word for word in _BUSINESS_VP_ACTION_WORDS if word.lower() in tl), "")
+            result = next((word for word in _BUSINESS_VP_RESULT_WORDS
+                           if has_numbered_indicator(word)), "")
+            covered = bool(tl) and bool(background and action and result)
+            evidence = (
+                f"背景：{_evidence(t, [background])}；承接动作：{_evidence(t, [action])}；"
+                f"结果指标：{_evidence(t, [result])}"
+                if covered else ""
+            )
+        else:
+            covered = bool(tl) and any(word.lower() in tl for word in words)
+            evidence = _evidence(t, words) if covered else ""
+        item = {"name": dimension, "covered": covered, "evidence": evidence}
         detail.append(item)
         (hit if covered else miss).append(dimension)
     count = len(dimensions)
@@ -638,6 +675,26 @@ def evaluate_writing_reference(text: str, title: str = "", name: str = "") -> di
         comment = f"已覆盖岗位书写参考维度 {len(hit)}/{count} 项，建议补充「{'、'.join(miss[:2])}」等板块"
     else:
         comment = f"仅覆盖岗位书写参考维度 {len(hit)}/{count} 项，建议按「{template['label']}」模板补齐「{'、'.join(miss[:3])}」"
+    if template.get("key") == "胡总":
+        context_rule = (
+            "情境评估口径：业务副总因人员缺口下沉承接业务时，需同时写明人员缺口背景、"
+            "实际承接动作和可量化业务结果，三项证据齐全才计入该维度；仅说明缺员不加分，"
+            "也不替代经营、协同与决策维度。"
+        )
+        context_detail = next((item for item in detail
+                               if item["name"] == _BUSINESS_VP_CONTEXT_DIMENSION), {})
+        if context_detail.get("covered"):
+            comment = f"{comment}；{context_rule}本期已满足三项证据并计入"
+        else:
+            missing = []
+            if not any(word.lower() in tl for word in _BUSINESS_VP_BACKGROUND_WORDS):
+                missing.append("人员缺口背景")
+            if not any(word.lower() in tl for word in _BUSINESS_VP_ACTION_WORDS):
+                missing.append("实际承接动作")
+            if not any(has_numbered_indicator(word) for word in _BUSINESS_VP_RESULT_WORDS):
+                missing.append("量化业务结果")
+            gap = "、".join(missing) or "三项证据"
+            comment = f"{comment}；{context_rule}本期暂不计入，待补充{gap}"
     return {
         "score": score,
         "max": 20,
@@ -650,6 +707,11 @@ def evaluate_writing_reference(text: str, title: str = "", name: str = "") -> di
         "miss": miss,
         "detail": detail,
         "comment": comment,
+        "context_note": (
+            "业务副总情境指标：人员缺口背景 + 实际下沉承接动作 + 可量化业务结果，"
+            "三项证据齐全才计分；背景本身不加分。"
+            if template.get("key") == "胡总" else ""
+        ),
     }
 
 

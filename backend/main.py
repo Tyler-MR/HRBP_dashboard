@@ -22,12 +22,17 @@ from schemas import (
     ProgressItem, ProgressSummary,
     AttritionOverview, AttritionByDept, AttritionByReason, AttritionMonthly, AttritionByTenure, AttritionResponse,
     HrEfficiencyMonthly, HrEfficiencySummary, HrEfficiencyResponse,
+    HrEfficiencyDepartment,
     HrStaffStats, AgeDistribution, EducationDistribution, TenureDistribution, DeptHeadcount, EduFilterOption,
     MonthlyStaffTrend,
-    DeptMetric, DeptEfficiency, DeptEfficiencyResponse,
+    DeptMetric, DeptEfficiency, DeptEfficiencyResponse, DeptPerformanceGoal,
     SubjectiveEval, DeptMember, MemberMetric,
     MemberScoreItem, MemberRadarResponse, MemberScoreSave, ManagerEvaluationSave, RadarDimInfo,
     TalentDimension, TalentRadarData, DeptTalentScore, TalentAnalysisResponse,
+)
+from hr_efficiency_source import (
+    DINGTALK_HR_EFFICIENCY_MONTHLY,
+    get_hr_efficiency_snapshot,
 )
 
 app = FastAPI(title="月度招聘看板 API", version="1.0.0")
@@ -288,43 +293,29 @@ def init_talent_profiles():
 
 
 def init_hr_efficiency_data():
-    """初始化月度人效数据（模拟）"""
+    """将兼容旧数据库的人效表同步为钉钉源表快照。"""
     db = SessionLocal()
     try:
-        if db.query(HrEfficiency).count() > 0:
-            return
-
-        months = [
-            "2024-01", "2024-02", "2024-03", "2024-04",
-            "2024-05", "2024-06", "2024-07", "2024-08",
-            "2024-09", "2024-10", "2024-11", "2024-12",
-        ]
-
-        # 模拟营收数据 — 逐年递增 + 季节性波动（电商618/双11等）
-        revenue_base = [180, 165, 195, 210, 230, 380, 310, 290, 270, 320, 420, 480]
-        headcount_base = [120, 122, 125, 128, 132, 138, 142, 145, 148, 150, 155, 158]
-
-        for i, month in enumerate(months):
-            revenue = round(revenue_base[i] + random.uniform(-10, 15), 1)
-            headcount = headcount_base[i] + random.randint(-2, 3)
-
-            # 净利润约为营收的12%-22%
-            profit_margin = random.uniform(0.12, 0.22)
-            net_profit = round(revenue * profit_margin, 1)
-
-            # 人力成本：人均月成本约0.8-1.2万，逐渐增长
-            avg_cost_per = round(random.uniform(0.82, 1.18) * (1 + i * 0.008), 2)
-            total_labor_cost = round(avg_cost_per * headcount, 1)
-
-            db.add(HrEfficiency(
-                month=month,
-                revenue=revenue,
-                net_profit=net_profit,
-                total_labor_cost=total_labor_cost,
-                headcount=headcount,
-            ))
+        source_rows = [row for row in DINGTALK_HR_EFFICIENCY_MONTHLY if row.get("revenue") is not None]
+        source_months = {row["month"] for row in source_rows}
+        # 先提交旧演示行的删除，再读取/更新源表行，避免 SQLite 复用主键时污染 identity map。
+        if source_months:
+            stale_rows = db.query(HrEfficiency).filter(~HrEfficiency.month.in_(source_months)).all()
+            for stale in stale_rows:
+                db.delete(stale)
+            if stale_rows:
+                db.commit()
+                db.expunge_all()
+        existing = {row.month: row for row in db.query(HrEfficiency).all()}
+        for row in source_rows:
+            record = existing.get(row["month"]) or HrEfficiency(month=row["month"])
+            record.revenue = row["revenue"]
+            record.net_profit = row["net_profit"]
+            record.total_labor_cost = row["total_labor_cost"]
+            record.headcount = round(row["headcount"])
+            db.add(record)
         db.commit()
-        print(f"✅ 人效数据初始化完成: 12 个月数据")
+        print(f"✅ 人效数据初始化完成: 钉钉源表 {len(source_rows)} 个月数据")
     except Exception as e:
         db.rollback()
         print(f"❌ 人效数据初始化失败: {e}")
@@ -556,7 +547,24 @@ def _build_hr_staff_stats(db: Session, edu_filter: Optional[str] = None, month: 
         for k, v in sorted(dept_map.items(), key=lambda x: -x[1])
     ]
 
-    # 月度趋势：近12个月（截至统计月）入职人数 + 月末在岗人数（当前月精确，历史月近似），按 period 粒度聚合
+    # 月度趋势：近12个月（截至统计月）入职人数 + 月末在岗人数（当前月精确，历史月近似），按 period 粒度聚合。
+    # 公司人效月度数据存在明确的「在岗人数」时优先使用该源值；花名册只能看到当前在职员工，
+    # 用它回溯历史会漏掉后来离职人员，不能覆盖有源值的历史月份。
+    source_headcounts = {}
+    try:
+        source_snapshot = get_hr_efficiency_snapshot()
+        for source_row in source_snapshot.get("monthly", []):
+            source_month = str(source_row.get("month") or "")
+            source_headcount = source_row.get("headcount")
+            if source_month and source_headcount is not None:
+                try:
+                    source_headcounts[source_month] = int(round(float(source_headcount)))
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        # 人效源表暂时不可用时继续提供花名册回溯值，避免整个人员结构看板失败。
+        source_headcounts = {}
+
     month_points = []  # (YYYY-MM, hires, headcount)
     for i in range(11, -1, -1):
         yy, mm = y, m - i
@@ -576,6 +584,8 @@ def _build_hr_staff_stats(db: Session, edu_filter: Optional[str] = None, month: 
                 Employee.hired_date.isnot(None),
                 Employee.hired_date <= end,
             ).count()
+        if label in source_headcounts:
+            headcount = source_headcounts[label]
         month_points.append((label, hires, headcount))
 
     def _period_key(ym: str) -> str:
@@ -991,67 +1001,127 @@ def health():
 # ==================== 人效数据看板 API ====================
 
 @app.get("/api/hr-efficiency", response_model=HrEfficiencyResponse)
-def get_hr_efficiency(period: str = Query("month", description="month/quarter/half/year 聚合粒度"), db: Session = Depends(get_db)):
-    """获取人效数据，支持 月度/季度/半年度/年度 聚合（营收/成本/利润求和，在岗人数取均值，人均指标重算）。"""
-    records = db.query(HrEfficiency).order_by(HrEfficiency.month).all()
+def get_hr_efficiency(
+    period: str = Query("month", description="month/quarter/half/year 聚合粒度"),
+    force: bool = Query(False, description="是否绕过缓存强制从钉钉多维表刷新"),
+    db: Session = Depends(get_db),
+):
+    """读取钉钉多维表快照，支持月度/季度/半年度/年度视图。
 
-    def _agg(recs):
-        rev = sum(r.revenue for r in recs)
-        profit = sum(r.net_profit for r in recs)
-        labor = sum(r.total_labor_cost for r in recs)
-        hc = sum(r.headcount for r in recs) / len(recs) if recs else 0
-        return rev, profit, labor, hc
+    这里不再读取旧的随机演示数据。月度视图显式保留源表中的空月份，
+    年度摘要直接使用源表「年度汇总」行，避免把年度汇总重复计入。
+    """
+    del db  # 保留依赖参数以兼容现有路由调用；数据源改为钉钉快照。
 
-    def _item(key, rev, profit, labor, hc):
+    def _source_item(row: dict) -> HrEfficiencyMonthly:
+        normalized = dict(row)
+        for field in (
+            "revenue", "net_profit", "total_labor_cost", "headcount",
+            "revenue_per_employee", "cost_per_employee", "profit_per_employee",
+            "cost_efficiency",
+        ):
+            value = normalized.get(field)
+            if value is not None:
+                normalized[field] = round(float(value), 2)
+        return HrEfficiencyMonthly(**normalized)
+
+    def _valid(row: dict) -> bool:
+        return row.get("revenue") is not None and row.get("total_labor_cost") is not None
+
+    def _aggregate(key: str, label: str, rows: list[dict]) -> HrEfficiencyMonthly:
+        valid = [row for row in rows if _valid(row)]
+        if not valid:
+            return HrEfficiencyMonthly(month=key, label=label)
+        revenue = sum(row["revenue"] for row in valid)
+        profit = sum(row["net_profit"] for row in valid)
+        labor = sum(row["total_labor_cost"] for row in valid)
+        headcount = sum(row["headcount"] for row in valid) / len(valid)
         return HrEfficiencyMonthly(
-            month=key, label=key,
-            revenue=round(rev, 1), net_profit=round(profit, 1),
-            total_labor_cost=round(labor, 1), headcount=round(hc, 1),
-            revenue_per_employee=round(rev / hc, 2) if hc > 0 else 0,
-            cost_per_employee=round(labor / hc, 2) if hc > 0 else 0,
-            profit_per_employee=round(profit / hc, 2) if hc > 0 else 0,
-            cost_efficiency=round(rev / labor, 2) if labor > 0 else 0,
+            month=key,
+            label=label,
+            revenue=round(revenue, 2),
+            net_profit=round(profit, 2),
+            total_labor_cost=round(labor, 2),
+            headcount=round(headcount, 2),
+            revenue_per_employee=round(revenue / headcount, 2) if headcount else None,
+            cost_per_employee=round(labor / headcount, 2) if headcount else None,
+            profit_per_employee=round(profit / headcount, 2) if headcount else None,
+            cost_efficiency=round(revenue / labor, 2) if labor else None,
         )
 
-    monthly = []
+    snapshot = get_hr_efficiency_snapshot(force=force)
+    source_rows = snapshot["monthly"]
+    annual_source = snapshot["annual"]
     if period == "month":
-        for rec in records:
-            monthly.append(_item(rec.month, rec.revenue, rec.net_profit, rec.total_labor_cost, rec.headcount))
-    else:
-        groups: dict = {}
-        for rec in records:
-            y, m = rec.month.split("-")
-            mi = int(m)
-            if period == "quarter":
-                key = f"{y}-Q{(mi - 1) // 3 + 1}"
-            elif period == "half":
-                key = f"{y}-H{1 if mi <= 6 else 2}"
-            else:  # year
-                key = y
-            groups.setdefault(key, []).append(rec)
-        for key in sorted(groups):
-            monthly.append(_item(key, *_agg(groups[key])))
-
-    # 汇总（年度口径：各聚合项求和=全年，在岗取均值）
-    if monthly:
-        total_rev = sum(m.revenue for m in monthly)
-        total_profit = sum(m.net_profit for m in monthly)
-        total_labor = sum(m.total_labor_cost for m in monthly)
-        avg_hc = sum(m.headcount for m in monthly) / len(monthly)
+        monthly = [_source_item(row) for row in source_rows]
+        annual = annual_source
         summary = HrEfficiencySummary(
-            total_revenue=round(total_rev, 1),
-            total_net_profit=round(total_profit, 1),
-            total_labor_cost=round(total_labor, 1),
-            avg_headcount=round(avg_hc, 0),
-            avg_revenue_per_employee=round(total_rev / avg_hc, 2) if avg_hc > 0 else 0,
-            avg_cost_per_employee=round(total_labor / avg_hc, 2) if avg_hc > 0 else 0,
-            avg_profit_per_employee=round(total_profit / avg_hc, 2) if avg_hc > 0 else 0,
-            avg_cost_efficiency=round(total_rev / total_labor, 2) if total_labor > 0 else 0,
+            total_revenue=round(annual["revenue"], 2),
+            total_net_profit=round(annual["net_profit"], 2),
+            total_labor_cost=round(annual["total_labor_cost"], 2),
+            avg_headcount=round(annual["headcount"], 2),
+            avg_revenue_per_employee=round(annual["revenue_per_employee"], 2),
+            avg_cost_per_employee=round(annual["cost_per_employee"], 2),
+            avg_profit_per_employee=round(annual["profit_per_employee"], 2),
+            avg_cost_efficiency=round(annual["cost_efficiency"], 2),
+        )
+    elif period == "year":
+        monthly = [_source_item(annual_source)]
+        annual = annual_source
+        summary = HrEfficiencySummary(
+            total_revenue=round(annual["revenue"], 2),
+            total_net_profit=round(annual["net_profit"], 2),
+            total_labor_cost=round(annual["total_labor_cost"], 2),
+            avg_headcount=round(annual["headcount"], 2),
+            avg_revenue_per_employee=round(annual["revenue_per_employee"], 2),
+            avg_cost_per_employee=round(annual["cost_per_employee"], 2),
+            avg_profit_per_employee=round(annual["profit_per_employee"], 2),
+            avg_cost_efficiency=round(annual["cost_efficiency"], 2),
         )
     else:
-        summary = None
+        groups: dict[str, list[dict]] = {}
+        labels: dict[str, str] = {}
+        for row in source_rows:
+            year, month = row["month"].split("-")
+            month_number = int(month)
+            if period == "quarter":
+                key = f"{year}-Q{(month_number - 1) // 3 + 1}"
+                label = f"{year}年第{(month_number - 1) // 3 + 1}季度"
+            else:  # half
+                half = 1 if month_number <= 6 else 2
+                key = f"{year}-H{half}"
+                label = f"{year}年上半年" if half == 1 else f"{year}年下半年"
+            groups.setdefault(key, []).append(row)
+            labels[key] = label
+        monthly = [_aggregate(key, labels[key], groups[key]) for key in sorted(groups)]
+        valid_monthly = [row for row in monthly if row.revenue is not None]
+        if valid_monthly:
+            total_revenue = sum(row.revenue for row in valid_monthly)
+            total_profit = sum(row.net_profit for row in valid_monthly)
+            total_labor = sum(row.total_labor_cost for row in valid_monthly)
+            avg_headcount = sum(row.headcount for row in valid_monthly) / len(valid_monthly)
+            summary = HrEfficiencySummary(
+                total_revenue=round(total_revenue, 2),
+                total_net_profit=round(total_profit, 2),
+                total_labor_cost=round(total_labor, 2),
+                avg_headcount=round(avg_headcount, 2),
+                avg_revenue_per_employee=round(total_revenue / avg_headcount, 2),
+                avg_cost_per_employee=round(total_labor / avg_headcount, 2),
+                avg_profit_per_employee=round(total_profit / avg_headcount, 2),
+                avg_cost_efficiency=round(total_revenue / total_labor, 2),
+            )
+        else:
+            summary = None
 
-    return HrEfficiencyResponse(monthly=monthly, summary=summary)
+    departments = [HrEfficiencyDepartment(**row) for row in snapshot["departments"]]
+    return HrEfficiencyResponse(
+        monthly=monthly,
+        summary=summary,
+        departments=departments,
+        source=snapshot["source"],
+        source_note=snapshot["source_note"],
+        updated_at=snapshot["synced_at"],
+    )
 
 
 # ==================== 离职分析 API ====================
@@ -1208,6 +1278,72 @@ def _apply_member_radar_scores_legacy(depts):
 # 这里仅用于保护 MySQL/本地计算，前端不再轮询）
 _dept_metrics_cache: Dict[str, Any] = {"ts": {}, "data": {}}
 _DEPT_METRICS_CACHE_TTL = 60
+
+# 业务副总沟通带领的单部门业务团队：目标先固定为 2026 年 9 月，实际值只取对应渠道数据源。
+# 商务/1688 当前没有接入可核验业绩表，因此只展示目标并明确标注数据缺口，不以 0 伪造完成值。
+_PERFORMANCE_GOAL_PERIOD = "2026-09"
+_PERFORMANCE_GOAL_CONFIG = {
+    "拼多多团队": [("拼多多", 1000.0, "拼多多经营数据")],
+    "淘宝团队": [
+        ("淘宝", 30.0, "淘宝/天猫经营数据"),
+        ("商务", 15.0, "待接入商务业绩数据"),
+        ("1688", 10.0, "待接入 1688 业绩数据"),
+    ],
+}
+
+
+def _attach_performance_goals(depts):
+    """把 2026-09 目标绑定到拼多多/淘宝业务板块，并按数据周期计算完成率。"""
+    for dept in depts:
+        config = _PERFORMANCE_GOAL_CONFIG.get(dept.department)
+        if not config:
+            continue
+
+        sales_metric = next((m for m in dept.metrics if m.name == "月销售额"), None)
+        actual = None
+        if sales_metric is not None and not dept.source_error and dept.data_available:
+            try:
+                actual = round(float(sales_metric.value), 2)
+            except (TypeError, ValueError):
+                actual = None
+        actual_period = dept.data_period or ""
+        goals = []
+        for channel, target, source_note in config:
+            is_channel_actual = channel in ("拼多多", "淘宝")
+            progress = None
+            actual_available = False
+            note = source_note
+            if is_channel_actual and actual is not None:
+                if actual_period == _PERFORMANCE_GOAL_PERIOD:
+                    progress = round(actual / target * 100, 1) if target else None
+                    actual_available = progress is not None
+                    note = f"实际值来源：{source_note}；完成率按实际销售额 ÷ 目标计算"
+                else:
+                    note = (
+                        f"当前可见数据为 {actual_period or '未知周期'}，目标周期为 {_PERFORMANCE_GOAL_PERIOD}；"
+                        "选择目标月份后计算完成率"
+                    )
+            elif not is_channel_actual:
+                note = f"{source_note}，接入后计算完成率"
+            elif dept.source_error:
+                note = f"{source_note}暂不可用，未读取完成值"
+            else:
+                note = f"{source_note}暂无有效记录，未计算完成率"
+
+            goals.append(DeptPerformanceGoal(
+                name=channel,
+                period=_PERFORMANCE_GOAL_PERIOD,
+                target=target,
+                unit="万元",
+                actual=actual if is_channel_actual else None,
+                actual_period=actual_period,
+                progress=progress,
+                actual_available=actual_available,
+                source=source_note,
+                note=note,
+            ))
+        dept.performance_goals = goals
+    return depts
 
 
 def _clear_dept_metrics_cache():
@@ -1440,7 +1576,7 @@ def _dept_metrics_data(month: Optional[str] = None):
     from pdd_bi import build_pdd_dept
     from taobao_bi import build_taobao_dept
     from product_bi import build_product_dept  # 产品团队：钉钉多维表「产品全流程进度跟踪」
-    depts = [build_pdd_dept(month), build_taobao_dept()]
+    depts = [build_pdd_dept(month), build_taobao_dept(month)]
 
     # ═══ 展示占位部门（暂无经营数据源，按用户要求恢复展示，指标为占位值；产品团队已接钉钉多维表）═══
 
@@ -1543,6 +1679,9 @@ def _dept_metrics_data(month: Optional[str] = None):
             # 成员=花名册真实人员（财务部在职），不编造占位
             members=fin_members),
     ]
+
+    # 业绩目标与完成进度：只对已核验的渠道经营数据计算实际值，其余团队保留目标并标注待接入。
+    depts = _attach_performance_goals(depts)
 
     # 直属上级评价按部门+姓名覆盖内置/花名册评价；评价不参与雷达分数计算。
     depts = _apply_manager_evaluations(depts)
@@ -2888,6 +3027,25 @@ def _weekly_report_text(draw, text, xy, font, fill, max_width: int, line_gap: in
     return y
 
 
+def _report_text_lines(draw, value, font, max_width: int):
+    """Return every wrapped line used by a downloadable report.
+
+    The browser cards can deliberately clamp copy for a compact view, but a
+    downloaded report is an audit artifact.  Its renderer therefore uses this
+    helper without an ellipsis or a maximum-line limit.
+    """
+    return _weekly_report_lines(draw, value or "—", font, max_width)
+
+
+def _report_line_height(font, gap: int = 7):
+    bbox = font.getbbox("中")
+    return bbox[3] - bbox[1] + gap
+
+
+def _report_text_height(draw, value, font, max_width: int, gap: int = 7):
+    return len(_report_text_lines(draw, value, font, max_width)) * _report_line_height(font, gap)
+
+
 def _weekly_report_num(value):
     try:
         number = float(value)
@@ -2897,12 +3055,12 @@ def _weekly_report_num(value):
 
 
 def _render_weekly_report_png(report: dict, output_path):
-    """Render one person's weekly or comprehensive score report and persist it as a PNG."""
+    """Render one person's weekly report as a complete, auto-height PNG."""
     import math
     from datetime import datetime as dt
     from PIL import Image, ImageDraw
 
-    width, height = 1400, 1900
+    width = 1400
     bg = "#f6f7fb"
     indigo = "#4f46e5"
     text = "#182033"
@@ -2910,8 +3068,6 @@ def _render_weekly_report_png(report: dict, output_path):
     green = "#059669"
     amber = "#d97706"
     red = "#dc2626"
-    image = Image.new("RGB", (width, height), bg)
-    draw = ImageDraw.Draw(image)
     f_title = _weekly_report_font(40, True)
     f_name = _weekly_report_font(30, True)
     f_section = _weekly_report_font(24, True)
@@ -2920,8 +3076,28 @@ def _render_weekly_report_png(report: dict, output_path):
     f_score = _weekly_report_font(56, True)
     f_metric = _weekly_report_font(25, True)
 
+    # Draw on a temporary canvas while measuring the variable-height sections.
+    image = Image.new("RGB", (width, 10000), bg)
+    draw = ImageDraw.Draw(image)
+
     def card(box, fill="#ffffff", outline="#e5e7eb", radius=18):
         draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=2)
+
+    def full_text(value, xy, font=f_small, fill=text, max_width=600, gap=7):
+        lines = _report_text_lines(draw, value, font, max_width)
+        line_height = _report_line_height(font, gap)
+        x, y = xy
+        for line in lines:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += line_height
+        return y
+
+    def values_of(values):
+        if isinstance(values, (list, tuple)):
+            return [str(value) for value in values if str(value).strip()]
+        if values is None or not str(values).strip():
+            return []
+        return [str(values)]
 
     name = report.get("name") or "管理人员"
     title = report.get("title") or ""
@@ -2939,10 +3115,26 @@ def _render_weekly_report_png(report: dict, output_path):
     draw.text((width - 65, 62), period_label, font=f_section, fill="#ffffff", anchor="ra")
     draw.text((width - 65, 112), f"生成于 {dt.now().strftime('%Y-%m-%d %H:%M')}", font=f_small, fill="#c7d2fe", anchor="ra")
 
-    card((55, 245, 790, 760))
-    draw.text((90, 280), "五维日志质量雷达", font=f_section, fill=text)
+    # Dimension rows are measured before drawing so long assessment dimension
+    # names wrap completely and the fifth row never falls outside the card.
     radar = report.get("radar") or []
-    center = (420, 570)
+    detail_rows = []
+    detail_y = 345
+    detail_line_height = _report_line_height(f_body, 4)
+    for item in radar:
+        score_value = float(item.get("score") or 0)
+        max_value = float(item.get("max") or 0)
+        label = f"{item.get('dimension', '')}  {_weekly_report_num(score_value)}/{_weekly_report_num(max_value)}"
+        lines = _report_text_lines(draw, label, f_body, 390)
+        row_height = max(105, len(lines) * detail_line_height + 55)
+        detail_rows.append((detail_y, lines, score_value, max_value, row_height))
+        detail_y += row_height
+    top_bottom = max(760, detail_y + 25)
+    top_height = top_bottom - 245
+
+    card((55, 245, 790, top_bottom))
+    draw.text((90, 280), "五维日志质量雷达", font=f_section, fill=text)
+    center = (420, 245 + top_height // 2 + 35)
     radius = 165
     if radar:
         count = len(radar)
@@ -2962,7 +3154,8 @@ def _render_weekly_report_png(report: dict, output_path):
             values.append(point_at(i, score_value / max_value))
             draw.line([center, point_at(i, 1.0)], fill="#dbe4f0", width=2)
             label_point = point_at(i, 1.18)
-            draw.multiline_text(label_point, str(item.get("dimension") or ""), font=f_small,
+            radar_label = "\n".join(_report_text_lines(draw, str(item.get("dimension") or ""), f_small, 180))
+            draw.multiline_text(label_point, radar_label, font=f_small,
                                 fill=text, anchor="mm", align="center", spacing=2)
         draw.polygon(values, fill="#c7d2fe", outline=indigo)
         draw.line(values + [values[0]], fill=indigo, width=5, joint="curve")
@@ -2971,27 +3164,26 @@ def _render_weekly_report_png(report: dict, output_path):
     else:
         draw.text(center, f"{cycle_word}暂无日志评分数据", font=f_body, fill=muted, anchor="mm")
 
-    card((875, 245, 1345, 760))
+    card((875, 245, 1345, top_bottom))
     draw.text((915, 280), "维度评分", font=f_section, fill=text)
-    y = 345
-    for item in radar:
-        score_value = float(item.get("score") or 0)
-        max_value = float(item.get("max") or 0)
+    for y, lines, score_value, max_value, _row_height in detail_rows:
         ratio = max(0.0, min(1.0, score_value / max_value)) if max_value else 0
-        label = f"{item.get('dimension', '')}  {_weekly_report_num(score_value)}/{_weekly_report_num(max_value)}"
-        draw.text((915, y), label, font=f_body, fill=text)
-        draw.rounded_rectangle((915, y + 34, 1305, y + 52), radius=9, fill="#e5e7eb")
+        for line_index, line in enumerate(lines):
+            draw.text((915, y + line_index * detail_line_height), line, font=f_body, fill=text)
+        bar_y = y + len(lines) * detail_line_height + 8
+        draw.rounded_rectangle((915, bar_y, 1305, bar_y + 18), radius=9, fill="#e5e7eb")
         if ratio:
-            draw.rounded_rectangle((915, y + 34, 915 + 390 * ratio, y + 52), radius=9, fill=indigo)
-        y += 105
+            draw.rounded_rectangle((915, bar_y, 915 + 390 * ratio, bar_y + 18), radius=9, fill=indigo)
     if not radar:
         draw.text((915, 350), "暂无可展示的维度评分", font=f_body, fill=muted)
 
-    card((55, 795, 790, 1005), fill="#eef2ff", outline="#c7d2fe")
-    draw.text((90, 835), average_label, font=f_body, fill=muted)
-    draw.text((90, 875), _weekly_report_num(report.get("avg_score")), font=f_score, fill=indigo)
-    draw.text((420, 835), "评级", font=f_body, fill=muted)
-    draw.text((420, 875), report.get("grade_cn") or "—", font=f_score,
+    summary_top = top_bottom + 35
+    summary_bottom = summary_top + 210
+    card((55, summary_top, 790, summary_bottom), fill="#eef2ff", outline="#c7d2fe")
+    draw.text((90, summary_top + 40), average_label, font=f_body, fill=muted)
+    draw.text((90, summary_top + 80), _weekly_report_num(report.get("avg_score")), font=f_score, fill=indigo)
+    draw.text((420, summary_top + 40), "评级", font=f_body, fill=muted)
+    draw.text((420, summary_top + 80), report.get("grade_cn") or "—", font=f_score,
               fill=green if report.get("grade") in ("A", "B") else amber)
 
     metrics = [
@@ -3002,48 +3194,406 @@ def _render_weekly_report_png(report: dict, output_path):
     ]
     x = 875
     for label, value in metrics:
-        card((x, 795, x + 110, 1005))
-        draw.text((x + 55, 835), label, font=f_small, fill=muted, anchor="ma")
-        draw.text((x + 55, 910), value, font=f_metric, fill=indigo, anchor="ma")
+        card((x, summary_top, x + 110, summary_bottom))
+        full_text(label, (x + 12, summary_top + 40), f_small, muted, 86, gap=4)
+        draw.text((x + 55, summary_top + 115), value, font=f_metric, fill=indigo, anchor="ma")
         x += 118
 
-    draw.text((55, 1050), "补充评估", font=f_section, fill=text)
+    assess_title_y = summary_bottom + 45
+    draw.text((55, assess_title_y), "补充评估", font=f_section, fill=text)
     assess = report.get("assess") or {}
     assess_items = [("电商行业属性", "industry"), ("岗位要求契合", "role"),
                     ("岗位书写维度", "writing_reference"), ("日报书写展现", "writing")]
+    assess_width = 272
+    assess_line_height = _report_line_height(f_small, 5)
+    assess_height = 170
+    for _label, key in assess_items:
+        item = assess.get(key) or {}
+        assess_height = max(assess_height, 105 + _report_text_height(draw, item.get("comment") or "本周无日志，无法评估",
+                                                                      f_small, assess_width, 5) + 25)
+    assess_top = assess_title_y + 45
+    assess_bottom = assess_top + assess_height
     x = 55
     for label, key in assess_items:
         item = assess.get(key) or {}
         score = item.get("score", 0)
-        card((x, 1095, x + 320, 1265))
-        draw.text((x + 24, 1120), label, font=f_body, fill=text)
-        draw.text((x + 294, 1120), f"{_weekly_report_num(score)}/20", font=f_metric,
+        card((x, assess_top, x + 320, assess_bottom))
+        draw.text((x + 24, assess_top + 25), label, font=f_body, fill=text)
+        draw.text((x + 294, assess_top + 25), f"{_weekly_report_num(score)}/20", font=f_metric,
                   fill=green if float(score or 0) >= 15 else amber if float(score or 0) >= 10 else red, anchor="ra")
-        _weekly_report_text(draw, item.get("comment") or "本周无日志，无法评估", (x + 24, 1170), f_small, muted, 272, max_lines=3)
+        full_text(item.get("comment") or "本周无日志，无法评估", (x + 24, assess_top + 75), f_small, muted, assess_width, gap=5)
         x += 335
+
+    def list_height(values, box_width, minimum):
+        items = values_of(values) or ["暂无记录"]
+        body_height = sum(_report_text_height(draw, "• " + value, f_small, box_width, 5) + 10 for value in items)
+        return max(minimum, 68 + body_height + 28)
 
     def list_box(box, heading, values, color):
         card(box)
         x0, y0, x1, y1 = box
         draw.text((x0 + 25, y0 + 22), heading, font=f_section, fill=color)
         current = y0 + 68
-        items = values or ["暂无记录"]
+        items = values_of(values) or ["暂无记录"]
         for value in items:
-            current = _weekly_report_text(draw, "• " + str(value), (x0 + 25, current), f_small, text,
-                                          x1 - x0 - 50, line_gap=5, max_lines=3) + 10
-            if current > y1 - 28:
-                break
+            current = full_text("• " + value, (x0 + 25, current), f_small, text,
+                                x1 - x0 - 50, gap=5) + 10
 
-    list_box((55, 1310, 675, 1585), f"{cycle_word}优点", report.get("strengths_list"), green)
-    list_box((725, 1310, 1345, 1585), "需改进方向", report.get("improvements_list"), amber)
-    list_box((55, 1615, 675, 1835), "整改建议", report.get("rectify"), red)
-    card((725, 1615, 1345, 1835), fill="#eef2ff", outline="#c7d2fe")
-    draw.text((750, 1640), "综合评估意见", font=f_section, fill=indigo)
-    _weekly_report_text(draw, report.get("comment") or "暂无综合评估意见", (750, 1690), f_small, text, 570, line_gap=7, max_lines=6)
-    draw.text((55, 1870), f"数据周期：{scope_label}  ·  本图片由管理人员日志评分报告自动生成", font=f_small, fill=muted)
+    list_top = assess_bottom + 45
+    first_list_height = max(list_height(report.get("strengths_list"), 570, 275),
+                            list_height(report.get("improvements_list"), 570, 275))
+    list_box((55, list_top, 675, list_top + first_list_height), f"{cycle_word}优点",
+             report.get("strengths_list"), green)
+    list_box((725, list_top, 1345, list_top + first_list_height), "需改进方向",
+             report.get("improvements_list"), amber)
 
+    second_list_top = list_top + first_list_height + 30
+    rectify_height = list_height(report.get("rectify"), 570, 220)
+    comment_height = max(220, 68 + _report_text_height(draw, report.get("comment") or "暂无综合评估意见",
+                                                        f_small, 570, 7) + 28)
+    second_list_height = max(rectify_height, comment_height)
+    list_box((55, second_list_top, 675, second_list_top + second_list_height), "整改建议",
+             report.get("rectify"), red)
+    card((725, second_list_top, 1345, second_list_top + second_list_height), fill="#eef2ff", outline="#c7d2fe")
+    draw.text((750, second_list_top + 25), "综合评估意见", font=f_section, fill=indigo)
+    full_text(report.get("comment") or "暂无综合评估意见", (750, second_list_top + 75), f_small, text, 570, gap=7)
+    footer_y = second_list_top + second_list_height + 35
+    draw.text((55, footer_y), f"数据周期：{scope_label}  ·  本图片由管理人员日志评分报告自动生成", font=f_small, fill=muted)
+
+    height = footer_y + 55
+    final_image = Image.new("RGB", (width, height), bg)
+    final_image.paste(image.crop((0, 0, width, min(image.height, height))), (0, 0))
     tmp_path = output_path.with_suffix(".tmp.png")
-    image.save(tmp_path, format="PNG", optimize=True)
+    final_image.save(tmp_path, format="PNG", optimize=True)
+    tmp_path.replace(output_path)
+
+
+def _render_comprehensive_report_png(report: dict, output_path):
+    """Render the same content shown in the comprehensive drawer as a complete PNG."""
+    import math
+    from datetime import datetime as dt
+    from PIL import Image, ImageDraw
+
+    width = 1500
+    bg = "#f6f7fb"
+    indigo = "#4f46e5"
+    text = "#182033"
+    muted = "#64748b"
+    green = "#059669"
+    amber = "#d97706"
+    red = "#dc2626"
+    image = Image.new("RGB", (width, 10000), bg)
+    draw = ImageDraw.Draw(image)
+    f_title = _weekly_report_font(40, True)
+    f_name = _weekly_report_font(30, True)
+    f_section = _weekly_report_font(24, True)
+    f_body = _weekly_report_font(20)
+    f_small = _weekly_report_font(17)
+    f_score = _weekly_report_font(56, True)
+    f_metric = _weekly_report_font(25, True)
+
+    def card(box, fill="#ffffff", outline="#e5e7eb", radius=18):
+        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=2)
+
+    def wrapped(value, xy, font=f_small, fill=text, max_width=600, max_lines=None, gap=7):
+        # max_lines is retained in the local signature for call-site clarity,
+        # but downloaded reports intentionally never truncate text.
+        return full_text(value, xy, font, fill, max_width, gap)
+
+    def full_text(value, xy, font=f_small, fill=text, max_width=600, gap=7):
+        lines = _report_text_lines(draw, value, font, max_width)
+        line_height = _report_line_height(font, gap)
+        x, y = xy
+        for line in lines:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += line_height
+        return y
+
+    def text_height(value, font, max_width, gap=7):
+        return _report_text_height(draw, value, font, max_width, gap)
+
+    def values_of(values):
+        if isinstance(values, (list, tuple)):
+            return [str(value) for value in values if str(value).strip()]
+        if values is None or not str(values).strip():
+            return []
+        return [str(values)]
+
+    def score_color(value):
+        try:
+            score = float(value or 0)
+        except (TypeError, ValueError):
+            score = 0
+        return green if score >= 15 else amber if score >= 10 else red
+
+    name = report.get("name") or "管理人员"
+    title = report.get("title") or ""
+    period_label = report.get("period_label") or report.get("period") or ""
+    scope_label = report.get("scope_label") or period_label
+    draw.rectangle((0, 0, width, 205), fill=indigo)
+    draw.text((65, 42), "管理人员综合评估分析报告", font=f_title, fill="#ffffff")
+    draw.text((65, 112), f"{name}  ·  {title}", font=f_name, fill="#e0e7ff")
+    draw.text((width - 65, 62), period_label, font=f_section, fill="#ffffff", anchor="ra")
+    draw.text((width - 65, 112), f"生成于 {dt.now().strftime('%Y-%m-%d %H:%M')}",
+              font=f_small, fill="#c7d2fe", anchor="ra")
+
+    # 与个人综合评估抽屉一致：综合评分、日志均分、评级和五项构成。
+    card((55, 245, 700, 530), fill="#eef2ff", outline="#c7d2fe")
+    draw.text((90, 280), "综合评分", font=f_body, fill=muted)
+    draw.text((90, 320), _weekly_report_num(report.get("comp_score")), font=f_score, fill=indigo)
+    draw.text((90, 430), f"日志均分 {_weekly_report_num(report.get('avg_score'))}",
+              font=f_body, fill=muted)
+    draw.text((430, 280), "评级", font=f_body, fill=muted)
+    draw.text((430, 320), report.get("grade_cn") or "—", font=f_score,
+              fill=green if report.get("grade") in ("A", "B") else amber)
+
+    card((780, 245, 1445, 530))
+    draw.text((815, 280), "综合评估构成", font=f_section, fill=text)
+    metrics = [
+        ("岗位职责契合", report.get("role_fit")),
+        ("业绩导向", report.get("perf_focus")),
+        ("团队管理", report.get("mgmt_focus")),
+        ("岗位书写维度", (report.get("writing_reference") or {}).get("score")),
+    ]
+    x = 815
+    for label, value in metrics:
+        card((x, 335, x + 145, 490), fill="#f8fafc", outline="#e2e8f0", radius=12)
+        wrapped(label, (x + 14, 360), f_small, muted, 117, max_lines=2, gap=4)
+        draw.text((x + 14, 425), f"{_weekly_report_num(value)}/20", font=f_metric,
+                  fill=indigo)
+        x += 155
+
+    # 与个人报告相同的五维雷达及精确分值。
+    # The five dimension detail rows are auto-sized.  This keeps long labels
+    # such as岗位书写参考维度 fully visible and prevents a row from colliding
+    # with the next section.
+    detail_rows = []
+    detail_y = 910
+    detail_line_height = _report_line_height(f_body, 4)
+    radar = report.get("radar") or []
+    for item in radar:
+        score_value = float(item.get("score") or 0)
+        max_value = float(item.get("max") or 0)
+        label = f"{item.get('dimension', '')}  {_weekly_report_num(score_value)}/{_weekly_report_num(max_value)}"
+        lines = _report_text_lines(draw, label, f_body, 520)
+        row_height = max(78, len(lines) * detail_line_height + 48)
+        detail_rows.append((detail_y, lines, score_value, max_value, row_height))
+        detail_y += row_height
+    detail_bottom = max(1300, detail_y + 20)
+
+    card((55, 805, 805, detail_bottom))
+    draw.text((90, 840), "评分维度（五维雷达）", font=f_section, fill=text)
+    center = (430, 805 + (detail_bottom - 805) // 2 + 20)
+    radius = 190
+    if radar:
+        count = len(radar)
+
+        def point_at(index, scale):
+            angle = -math.pi / 2 + index * 2 * math.pi / count
+            return (center[0] + math.cos(angle) * radius * scale,
+                    center[1] + math.sin(angle) * radius * scale)
+
+        for scale in (0.25, 0.5, 0.75, 1.0):
+            grid = [point_at(i, scale) for i in range(count)]
+            draw.line(grid + [grid[0]], fill="#cbd5e1", width=2)
+        values = []
+        for i, item in enumerate(radar):
+            max_value = float(item.get("max") or 1)
+            score_value = max(0.0, min(max_value, float(item.get("score") or 0)))
+            values.append(point_at(i, score_value / max_value))
+            draw.line([center, point_at(i, 1.0)], fill="#dbe4f0", width=2)
+            label_point = point_at(i, 1.18)
+            radar_label = "\n".join(_report_text_lines(draw, str(item.get("dimension") or ""), f_small, 180))
+            draw.multiline_text(label_point, radar_label, font=f_small,
+                                fill=text, anchor="mm", align="center", spacing=2)
+        draw.polygon(values, fill="#c7d2fe", outline=indigo)
+        draw.line(values + [values[0]], fill=indigo, width=5, joint="curve")
+        for x_point, y_point in values:
+            draw.ellipse((x_point - 7, y_point - 7, x_point + 7, y_point + 7),
+                         fill=indigo, outline="#ffffff", width=3)
+    else:
+        draw.text(center, "周期内暂无日志评分数据", font=f_body, fill=muted, anchor="mm")
+
+    card((850, 805, 1445, detail_bottom))
+    draw.text((885, 840), "五维评分明细", font=f_section, fill=text)
+    for y, lines, score_value, max_value, _row_height in detail_rows:
+        ratio = max(0.0, min(1.0, score_value / max_value)) if max_value else 0
+        for line_index, line in enumerate(lines):
+            draw.text((885, y + line_index * detail_line_height), line, font=f_body, fill=text)
+        bar_y = y + len(lines) * detail_line_height + 8
+        draw.rounded_rectangle((885, bar_y, 1405, bar_y + 18), radius=9, fill="#e5e7eb")
+        if ratio:
+            draw.rounded_rectangle((885, bar_y, 885 + 520 * ratio, bar_y + 18),
+                                   radius=9, fill=indigo)
+    if not radar:
+        draw.text((885, 910), "暂无可展示的维度评分", font=f_body, fill=muted)
+
+    # 个人综合评估抽屉中的四项评估及评语。
+    assess_title_y = detail_bottom + 45
+    draw.text((55, assess_title_y), "补充评估", font=f_section, fill=text)
+    assess = report.get("assess") or {}
+    assess_items = [("电商行业属性", "industry"), ("岗位要求契合", "role"),
+                    ("岗位书写维度", "writing_reference"), ("日报书写展现", "writing")]
+    assess_width = 610
+    def assess_card_height(key, item):
+        if key == "writing_reference":
+            template_h = text_height(item.get("template") or "管理岗参考模板", f_small, assess_width, 4)
+            comment_h = text_height(item.get("comment") or "周期内无日志，无法评估岗位书写维度", f_small, assess_width, 5)
+            return max(205, 126 + template_h + comment_h)
+        return max(205, 95 + text_height(item.get("comment") or "周期内无日志，无法评估", f_small, assess_width, 5))
+
+    row1_h = max(assess_card_height(key, assess.get(key) or {}) for _label, key in assess_items[:2])
+    row2_h = max(assess_card_height(key, assess.get(key) or {}) for _label, key in assess_items[2:])
+    assess_top = assess_title_y + 45
+    positions = [(55, assess_top), (775, assess_top),
+                 (55, assess_top + row1_h + 35), (775, assess_top + row1_h + 35)]
+    for (label, key), (x, y) in zip(assess_items, positions):
+        item = assess.get(key) or {}
+        score = item.get("score", 0)
+        card_height = row1_h if y == assess_top else row2_h
+        card((x, y, x + 670, y + card_height))
+        draw.text((x + 24, y + 24), label, font=f_body, fill=text)
+        draw.text((x + 644, y + 24), f"{_weekly_report_num(score)}/20", font=f_metric,
+                  fill=score_color(score), anchor="ra")
+        if key == "writing_reference":
+            template_y = wrapped(item.get("template") or "管理岗参考模板", (x + 24, y + 66), f_small,
+                                 indigo, assess_width, gap=4)
+            wrapped(item.get("comment") or "周期内无日志，无法评估岗位书写维度",
+                    (x + 24, template_y + 10), f_small, muted, assess_width, gap=5)
+        else:
+            wrapped(item.get("comment") or "周期内无日志，无法评估", (x + 24, y + 70),
+                    f_small, muted, assess_width, gap=5)
+
+    # 岗位书写参考维度：模板、核心要求、逐项覆盖和证据。
+    ref = report.get("writing_reference") or assess.get("writing_reference") or {}
+    assess_bottom = assess_top + row1_h + 35 + row2_h
+    ref_top = assess_bottom + 45
+    ref_title = f"管理岗日志书写参考维度（{ref.get('template') or '管理岗参考模板'}）"
+    ref_core = f"核心要求：{ref.get('core') or '—'}"
+    ref_detail = ref.get("detail") or []
+    ref_detail_rows = []
+    ref_y = ref_top + 145
+    ref_name_width = 270
+    ref_evidence_width = 960
+    for detail in ref_detail:
+        covered = bool(detail.get("covered"))
+        evidence = detail.get("evidence") if covered else "日志中未覆盖该书写板块"
+        name_h = text_height(detail.get("name") or "—", f_small, ref_name_width, 4)
+        evidence_h = text_height(evidence, f_small, ref_evidence_width, 4)
+        row_h = max(52, name_h, evidence_h) + 12
+        ref_detail_rows.append((ref_y, detail, covered, evidence, row_h))
+        ref_y += row_h
+    ref_comment_y = ref_y + 12
+    ref_comment_h = text_height(ref.get("comment") or "暂无岗位书写维度评语", f_small, 1300, 5)
+    ref_bottom = max(ref_top + 560, ref_comment_y + ref_comment_h + 30)
+    card((55, ref_top, 1445, ref_bottom), fill="#f8fafc", outline="#c7d2fe")
+    full_text(ref_title, (90, ref_top + 35), f_section, text, 1180, gap=4)
+    draw.text((1395, ref_top + 35), f"{_weekly_report_num(ref.get('score'))}/20", font=f_metric,
+              fill=score_color(ref.get("score")), anchor="ra")
+    full_text(ref_core, (90, ref_top + 85), f_small, indigo, 1300, gap=5)
+    for y, detail, covered, evidence, _row_h in ref_detail_rows:
+        marker = "✓" if covered else "✗"
+        marker_color = green if covered else red
+        draw.text((90, y), marker, font=f_body, fill=marker_color)
+        full_text(detail.get("name") or "—", (125, y), f_small, text, ref_name_width, gap=4)
+        full_text(evidence, (420, y), f_small, text if covered else muted, ref_evidence_width, gap=4)
+    full_text(ref.get("comment") or "暂无岗位书写维度评语", (90, ref_comment_y), f_small, muted, 1300, gap=5)
+
+    # 岗位职责覆盖：与个人报告中的优点/改进区域保持同一批证据。
+    role_detail = report.get("role_detail") or []
+    covered_roles = [item for item in role_detail if item.get("covered")]
+    missing_roles = [item for item in role_detail if not item.get("covered")]
+    role_top = ref_bottom + 40
+    role_line_height = _report_line_height(f_small, 4)
+    role_rows = []
+    max_role_rows = max(len(covered_roles), len(missing_roles), 1)
+    role_y = role_top + 95
+    for index in range(max_role_rows):
+        left = covered_roles[index] if index < len(covered_roles) else None
+        right = missing_roles[index] if index < len(missing_roles) else None
+        left_name_h = text_height(f"✓ {left.get('name') or '—'}", f_small, 245, 4) if left else 0
+        left_evidence_h = text_height(left.get("evidence") or "已覆盖", f_small, 390, 4) if left else 0
+        right_h = text_height(f"✗ {right.get('name') or '—'}", f_small, 600, 4) if right else 0
+        row_h = max(58, left_name_h, left_evidence_h, right_h) + 12
+        role_rows.append((role_y, left, right, row_h))
+        role_y += row_h
+    role_bottom = max(role_top + 500, role_y + 25)
+    card((55, role_top, 1445, role_bottom))
+    full_text(f"岗位职责覆盖（{title or '岗位职责'}）", (90, role_top + 35), f_section, text, 1300, gap=4)
+    draw.text((90, role_top + 95 - 50), "✅ 已覆盖职责", font=f_body, fill=green)
+    draw.text((785, role_top + 95 - 50), "⬜ 岗位职责未覆盖", font=f_body, fill=amber)
+    for row_y, left, right, _row_h in role_rows:
+        if left:
+            full_text(f"✓ {left.get('name') or '—'}", (90, row_y), f_small, text, 245, gap=4)
+            full_text(left.get("evidence") or "已覆盖", (350, row_y), f_small, muted, 390, gap=4)
+        if right:
+            full_text(f"✗ {right.get('name') or '—'}", (785, row_y), f_small, text, 600, gap=4)
+    if not covered_roles:
+        draw.text((90, role_top + 95), "暂无已覆盖职责", font=f_small, fill=muted)
+    if not missing_roles:
+        draw.text((785, role_top + 95), "暂无未覆盖职责", font=f_small, fill=muted)
+
+    # 优点、需改进方向和深度分析建议，与个人综合评估分析报告逐项对应。
+    strengths = [str(value) for value in (report.get("strengths_list") or [])
+                 if not str(value).startswith("岗位职责覆盖")]
+    improvements = [str(value) for value in (report.get("improvements_list") or [])
+                    if not str(value).startswith("岗位职责覆盖不足")]
+
+    def column_height(main_values, deep_values, box_width):
+        current = 78
+        for value in (main_values or ["暂无记录"]):
+            current += text_height("• " + str(value), f_small, box_width, 5) + 10
+        if deep_values:
+            current += 12 + _report_line_height(f_body, 5) + 12
+            for value in deep_values:
+                current += text_height("• " + str(value), f_small, box_width, 5) + 8
+        return max(660, current + 30)
+
+    def draw_report_column(box, heading, heading_color, main_values, deep_heading, deep_values):
+        x0, y0, x1, y1 = box
+        draw.text((x0 + 30, y0 + 25), heading, font=f_section, fill=heading_color)
+        current = y0 + 78
+        values = main_values or ["暂无记录"]
+        for value in values:
+            current = full_text("• " + str(value), (x0 + 30, current), f_small, text,
+                                x1 - x0 - 60, gap=5) + 10
+        if deep_values:
+            current += 12
+            current = full_text(deep_heading, (x0 + 30, current), f_body, heading_color,
+                                x1 - x0 - 60, gap=5) + 12
+            for value in deep_values:
+                current = full_text("• " + str(value), (x0 + 30, current), f_small, text,
+                                    x1 - x0 - 60, gap=5) + 8
+
+    column_top = role_bottom + 40
+    column_width = 620
+    column_height_value = max(column_height(strengths, report.get("deep_strengths") or [], column_width),
+                              column_height(improvements, report.get("deep_improvements") or [], column_width))
+    left_column = (55, column_top, 735, column_top + column_height_value)
+    right_column = (765, column_top, 1445, column_top + column_height_value)
+    card(left_column)
+    card(right_column)
+    draw_report_column(left_column, "👍 优点", green,
+                       strengths,
+                       "🌟 深度亮点（结合电商行业与岗位）", report.get("deep_strengths") or [])
+    draw_report_column(right_column, "💡 需改进方向", amber,
+                       improvements,
+                       "🔍 深度分析建议（结合电商行业与岗位）", report.get("deep_improvements") or [])
+
+    final_top = column_top + column_height_value + 40
+    final_comment_h = max(230, 85 + text_height(report.get("comment") or "暂无综合评估意见", f_small, 1330, 5) + 30)
+    card((55, final_top, 1445, final_top + final_comment_h), fill="#eef2ff", outline="#c7d2fe")
+    draw.text((90, final_top + 30), "📋 综合评估意见", font=f_section, fill=indigo)
+    full_text(report.get("comment") or "暂无综合评估意见", (90, final_top + 85), f_small, text, 1330, gap=5)
+    footer_y = final_top + final_comment_h + 35
+    draw.text((55, footer_y), f"数据周期：{scope_label}  ·  本图片内容与个人综合评估分析报告一致",
+              font=f_small, fill=muted)
+
+    height = footer_y + 55
+    final_image = Image.new("RGB", (width, height), bg)
+    final_image.paste(image.crop((0, 0, width, min(image.height, height))), (0, 0))
+    tmp_path = output_path.with_suffix(".tmp.png")
+    final_image.save(tmp_path, format="PNG", optimize=True)
     tmp_path.replace(output_path)
 
 
@@ -3308,7 +3858,7 @@ def logs_comprehensive_person_image(period: str = Query("month", description="mo
         output_path = _comprehensive_report_file(period, name, month_key)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    _render_weekly_report_png(report, output_path)
+    _render_comprehensive_report_png(report, output_path)
     filename = f"{name}_{report.get('period_label') or period}_综合评估报告.png"
     return FileResponse(output_path, media_type="image/png", filename=filename)
 
@@ -3363,7 +3913,7 @@ def logs_comprehensive_person_images_zip(period: str = Query("month", descriptio
                 continue
             report = _comprehensive_report_view(period, name, db, month_key)
             output_path = _comprehensive_report_file(period, name, month_key)
-            _render_weekly_report_png(report, output_path)
+            _render_comprehensive_report_png(report, output_path)
             bundle.write(output_path, arcname=f"{month_key or period}/{output_path.name}")
             written += 1
     if not written:

@@ -100,6 +100,45 @@
         </div>
       </div>
 
+      <!-- 业务目标与完成进度：目标与实际值分开，数据不可用时不显示为 0 -->
+      <section v-if="performanceGoals.length" class="performance-goals-panel">
+        <div class="performance-goals-head">
+          <div>
+            <div class="section-title performance-goals-title"><i class="ic ic-trend"></i> 业绩目标及完成进度</div>
+            <div class="performance-goals-subtitle">{{ performanceGoalPeriodLabel }} · 实际完成值按已接入的渠道经营数据计算</div>
+          </div>
+          <span class="performance-goals-tag"><i class="ic ic-star"></i> 目标管理</span>
+        </div>
+        <div class="performance-goals-grid">
+          <article v-for="goal in performanceGoals" :key="goal.name" class="performance-goal-card">
+            <div class="performance-goal-head">
+              <strong>{{ goal.name }}</strong>
+              <span>月度业绩</span>
+            </div>
+            <div class="performance-goal-target"><b>{{ fmtGoalAmount(goal.target) }}</b><em>{{ goal.unit }}</em></div>
+            <div class="performance-goal-actual">
+              <span>{{ goal.actual !== null && goal.actual !== undefined ? `${goal.actual_period || '当前'}实际完成` : '实际完成' }}</span>
+              <strong v-if="goal.actual !== null && goal.actual !== undefined">{{ fmtGoalAmount(goal.actual) }} {{ goal.unit }}</strong>
+              <strong v-else class="goal-no-data">暂无</strong>
+            </div>
+            <div class="performance-progress-track" role="progressbar"
+                 :aria-valuenow="goal.progress ?? 0" aria-valuemin="0" aria-valuemax="100"
+                 :aria-label="`${goal.name}完成进度`">
+              <div class="performance-progress-fill" :class="goalProgressClass(goal)" :style="goalProgressStyle(goal)"></div>
+            </div>
+            <div class="performance-progress-meta">
+              <span :class="goalProgressClass(goal)">{{ goalProgressLabel(goal) }}</span>
+              <b v-if="goal.progress !== null && goal.progress !== undefined">{{ Number(goal.progress).toFixed(1) }}%</b>
+              <b v-else>—</b>
+            </div>
+            <div class="performance-goal-note">{{ goal.note }}</div>
+          </article>
+        </div>
+        <div v-if="isTaobaoBusinessGoalPanel" class="performance-goals-note">
+          商务、1688与淘宝/天猫均归入业务副总沟通带领的业务板块，按独立团队分别看目标；当前仅淘宝/天猫已有经营数据，商务和 1688 待接入实际业绩数据。
+        </div>
+      </section>
+
       <!-- 设计稿件品效：按稿件数量与单稿件成本展示部门/设计师排名 -->
       <section v-if="isProductDept && designPerformance" class="design-performance-panel">
         <div class="design-performance-head">
@@ -526,6 +565,14 @@ const pddAnalysis = computed(() => activeDept.value?.pdd_product_analysis || nul
 // 设计稿件品效：固定展示用户指定的 2026 年 7—8 月，并支持季度/半年度聚合切换。
 const isProductDept = computed(() => activeDept.value?.department === '产品团队')
 const designPerformance = computed(() => activeDept.value?.design_performance || null)
+const performanceGoals = computed(() => activeDept.value?.performance_goals || [])
+const performanceGoalPeriodLabel = computed(() => {
+  const period = performanceGoals.value[0]?.period || ''
+  if (!period) return '月度目标'
+  const [year, monthNum] = period.split('-')
+  return `${year}年${Number(monthNum)}月业绩目标`
+})
+const isTaobaoBusinessGoalPanel = computed(() => activeDept.value?.department === '淘宝团队')
 const designPeriodTypes = [
   { key: 'month', label: '月度' },
   { key: 'quarter', label: '季度' },
@@ -553,6 +600,27 @@ function fmtQuantity(value) {
 function fmtCost(value) {
   const n = Number(value)
   return Number.isFinite(n) && n > 0 ? n.toFixed(2) : '—'
+}
+function fmtGoalAmount(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '—'
+  return n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })
+}
+function goalProgressStyle(goal) {
+  const progress = Number(goal.progress)
+  const pct = Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0
+  return { width: `${pct}%` }
+}
+function goalProgressClass(goal) {
+  if (goal.actual_available && Number(goal.progress) >= 100) return 'goal-achieved'
+  if (goal.actual_available) return 'goal-in-progress'
+  return 'goal-unavailable'
+}
+function goalProgressLabel(goal) {
+  if (goal.actual_available && Number(goal.progress) >= 100) return '已达成'
+  if (goal.actual_available) return '进行中'
+  if (goal.actual !== null && goal.actual !== undefined) return '待目标月数据'
+  return '待接入数据'
 }
 // 产品团队：指标带 group（产品部/设计部）→ 按维度分两行展示
 const isGroupedDept = computed(() => activeDept.value?.metrics?.some(m => m.group) ?? false)
@@ -968,6 +1036,36 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .src-tag { font-size: 10px; background: #dbeafe; color: #1d4ed8; padding: 2px 8px; border-radius: 8px; margin-left: 8px; font-weight: 600; vertical-align: middle; }
 .source-error { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px; padding: 10px 14px; font-size: 12px; margin-bottom: 16px; font-weight: 500; line-height: 1.6; }
 
+/* 业绩目标与完成进度 */
+.performance-goals-panel { margin: 0 0 18px; padding: 14px; border: 1px solid #fde68a; border-radius: 12px; background: linear-gradient(135deg, #fffdf5, #fff); }
+.performance-goals-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.performance-goals-title { border-top: 0; padding-top: 0; margin-bottom: 3px; color: #92400e; }
+.performance-goals-subtitle { color: #64748b; font-size: 11px; }
+.performance-goals-tag { flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 8px; color: #92400e; background: #fef3c7; font-size: 10px; }
+.performance-goals-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+.performance-goal-card { min-width: 0; padding: 12px; border: 1px solid #f1f5f9; border-top: 3px solid #f59e0b; border-radius: 9px; background: #fff; }
+.performance-goal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.performance-goal-head strong { color: #1f2937; font-size: 13px; }
+.performance-goal-head span { color: #94a3b8; font-size: 10px; }
+.performance-goal-target { display: flex; align-items: baseline; gap: 4px; margin-top: 9px; }
+.performance-goal-target b { color: #b45309; font-size: 24px; line-height: 1; }
+.performance-goal-target em { color: #64748b; font-size: 10px; font-style: normal; }
+.performance-goal-actual { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; color: #64748b; font-size: 10px; }
+.performance-goal-actual strong { color: #374151; font-size: 11px; }
+.performance-goal-actual .goal-no-data { color: #94a3b8; }
+.performance-progress-track { height: 8px; margin-top: 10px; overflow: hidden; border-radius: 8px; background: #f1f5f9; }
+.performance-progress-fill { height: 100%; min-width: 0; border-radius: inherit; transition: width .2s ease; }
+.performance-progress-fill.goal-achieved { background: #059669; }
+.performance-progress-fill.goal-in-progress { background: #4f46e5; }
+.performance-progress-fill.goal-unavailable { background: #cbd5e1; }
+.performance-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 6px; font-size: 10px; }
+.performance-progress-meta b { color: #374151; font-size: 11px; }
+.goal-achieved { color: #047857; }
+.goal-in-progress { color: #4338ca; }
+.goal-unavailable { color: #94a3b8; }
+.performance-goal-note { min-height: 30px; margin-top: 7px; color: #94a3b8; font-size: 10px; line-height: 1.5; }
+.performance-goals-note { margin-top: 10px; padding-top: 9px; border-top: 1px dashed #fcd34d; color: #92400e; font-size: 10px; line-height: 1.6; }
+
 /* 设计稿件品效排名 */
 .design-performance-panel { margin-bottom: 18px; border: 1px solid #d1fae5; border-radius: 12px; padding: 14px; background: linear-gradient(135deg, #f8fffc, #f8fbff); }
 .design-performance-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -1252,7 +1350,7 @@ onUnmounted(() => { window.removeEventListener('resize', handleResize); pddTrend
 .mm-val { color: #1a1a2e; font-weight: 600; }
 @media (max-width: 760px) {
   .pdd-kpi-grid, .pdd-analysis-grid, .pdd-report-grid, .pdd-brief-grid, .pdd-supervisor-columns, .pdd-diff-grid,
-  .design-summary-grid, .design-ranking-grid { grid-template-columns: 1fr; }
+  .design-summary-grid, .design-ranking-grid, .performance-goals-grid { grid-template-columns: 1fr; }
   .pdd-owner-row { grid-template-columns: 22px minmax(50px, 1fr) 38px 52px 52px; }
 }
 </style>

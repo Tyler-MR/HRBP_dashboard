@@ -645,6 +645,7 @@ def _month_aggregate(conn, month: str) -> dict:
     start, end = _month_range(month)
     sql = f"""
         SELECT
+            COUNT(*)                 AS records,
             COUNT(DISTINCT 店铺名称) AS stores,
             COUNT(DISTINCT 链接id)   AS links,
             COALESCE(SUM(单量), 0)        AS qty,
@@ -660,7 +661,7 @@ def _month_aggregate(conn, month: str) -> dict:
     with conn.cursor() as cur:
         cur.execute(sql, (start, end))
         row = cur.fetchone()
-    return row or {"stores": 0, "links": 0, "qty": 0.0, "revenue": 0.0, "cost": 0.0,
+    return row or {"records": 0, "stores": 0, "links": 0, "qty": 0.0, "revenue": 0.0, "cost": 0.0,
                    "shipping": 0.0, "promotion": 0.0, "gross_profit": 0.0, "profit": 0.0}
 
 
@@ -906,6 +907,8 @@ def build_pdd_dept(month: Optional[str] = None) -> DeptEfficiency:
         metrics=metrics,
         members=members,
         subjective=subjective,
+        data_period=cur_month,
+        data_available=bool(agg.get("records")),
         pdd_product_analysis=build_pdd_product_analysis(
             month,
             performance_by_owner,

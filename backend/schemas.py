@@ -150,14 +150,23 @@ class HrStaffStats(BaseModel):
 class HrEfficiencyMonthly(BaseModel):
     month: str                                # "2024-01" / "2024-Q1" / "2024-H1" / "2024"
     label: str = ""                           # 展示标签（同 month，前端直接用）
-    revenue: float = 0                        # 营业收入（万元）
-    net_profit: float = 0                     # 净利润（万元）
-    total_labor_cost: float = 0               # 人力总成本（万元）
-    headcount: float = 0                      # 在岗人数（聚合期为均值，可为小数）
-    revenue_per_employee: float = 0           # 人均收入
-    cost_per_employee: float = 0              # 人均成本
-    profit_per_employee: float = 0            # 人均净利润
-    cost_efficiency: float = 0                # 成本效能
+    revenue: Optional[float] = None           # 营业收入（保持源表显示值）
+    net_profit: Optional[float] = None        # 净利润（保持源表显示值）
+    total_labor_cost: Optional[float] = None  # 人力总成本（保持源表显示值）
+    headcount: Optional[float] = None         # 在岗人数（聚合期为均值，可为小数）
+    revenue_per_employee: Optional[float] = None  # 人均收入
+    cost_per_employee: Optional[float] = None      # 人均成本
+    profit_per_employee: Optional[float] = None    # 人均净利润
+    cost_efficiency: Optional[float] = None         # 成本效能
+    note: str = ""                              # 源表备注，如暂估/缺失
+
+
+class HrEfficiencyDepartment(BaseModel):
+    department: str
+    headcount: Optional[float] = None          # 有效部门记录人数汇总
+    revenue: Optional[float] = None            # 源表营收显示值
+    data_available: bool = True
+    note: str = ""
 
 
 class HrEfficiencySummary(BaseModel):
@@ -174,6 +183,10 @@ class HrEfficiencySummary(BaseModel):
 class HrEfficiencyResponse(BaseModel):
     monthly: List[HrEfficiencyMonthly] = []
     summary: Optional[HrEfficiencySummary] = None
+    departments: List[HrEfficiencyDepartment] = []
+    source: str = ""
+    source_note: str = ""
+    updated_at: str = ""
 
 
 # ========== 离职分析 ==========
@@ -383,6 +396,20 @@ class DesignPerformanceAnalysis(BaseModel):
     source_error: Optional[str] = None
 
 
+class DeptPerformanceGoal(BaseModel):
+    """部门/渠道月度业绩目标与完成进度，严格区分目标、实际值和数据缺口。"""
+    name: str
+    period: str
+    target: float = 0.0
+    unit: str = "万元"
+    actual: Optional[float] = None
+    actual_period: str = ""
+    progress: Optional[float] = None
+    actual_available: bool = False
+    source: str = ""
+    note: str = ""
+
+
 class SubjectiveEval(BaseModel):
     dimension: str                     # 评价维度
     score: float                       # 雷达单维 0-20
@@ -400,6 +427,9 @@ class DeptEfficiency(BaseModel):
     subjective: List[SubjectiveEval] = []
     pdd_product_analysis: Optional[PddProductAnalysis] = None
     design_performance: Optional[DesignPerformanceAnalysis] = None
+    performance_goals: List[DeptPerformanceGoal] = []
+    data_period: Optional[str] = None
+    data_available: bool = True
     source: Optional[str] = None          # 数据源标识: "mysql"=淘宝BI实时数据
     source_error: Optional[str] = None    # 数据源异常提示（如 MySQL 连接失败已重试）
     dingtalk_sync_at: Optional[str] = None  # 产品/设计钉钉多维表最近一次成功同步时间

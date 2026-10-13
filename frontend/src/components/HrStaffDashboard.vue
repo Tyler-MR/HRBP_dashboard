@@ -28,7 +28,7 @@
 
     <!-- 趋势：入职/在岗 -->
     <div class="trend-card" v-if="trendData.length">
-      <div class="trend-title">📈 入职人数 / 在岗趋势（{{ periodText }}） <span class="trend-note">（历史月在岗为近似值，当前月精确）</span></div>
+      <div class="trend-title">📊 2026年在职人数 / 入职人数（{{ periodText }}） <span class="trend-note">（1—7月采用公司人效月度数据；其余缺失月份按花名册回溯）</span></div>
       <div ref="trendChartRef" class="trend-chart"></div>
     </div>
 
@@ -66,17 +66,36 @@ const trendChartRef = ref(null)
 let trendChart = null
 
 const eduOptions = computed(() => hrStaff.value?.available_educations ?? [])
-const trendData = computed(() => hrStaff.value?.monthly_trend ?? [])
+const trendYear = '2026'
+const trendData = computed(() => (hrStaff.value?.monthly_trend ?? []).filter((row) => (
+  row.month === trendYear || row.month.startsWith(`${trendYear}-`)
+)))
 
 // 粒度切换：年度/半年度/季度/月度（趋势图）
 const periods = [
-  { value: 'year', label: '年度' },
-  { value: 'half', label: '半年度' },
-  { value: 'quarter', label: '季度' },
   { value: 'month', label: '月度' },
+  { value: 'quarter', label: '季度' },
+  { value: 'half', label: '半年度' },
+  { value: 'year', label: '年度' },
 ]
 const staffPeriod = ref('month')
 const periodText = computed(() => periods.find(p => p.value === staffPeriod.value)?.label || '月度')
+
+function formatTrendPeriod(value) {
+  if (!value) return '—'
+  if (/^\d{4}-\d{2}$/.test(value)) {
+    const [year, month] = value.split('-')
+    return year === trendYear ? `${Number(month)}月` : `${year}年${Number(month)}月`
+  }
+  const quarter = value.match(/^(\d{4})-Q(\d)$/)
+  if (quarter) return quarter[1] === trendYear ? `第${quarter[2]}季度` : `${quarter[1]}年第${quarter[2]}季度`
+  const half = value.match(/^(\d{4})-H(\d)$/)
+  if (half) return half[1] === trendYear ? (half[2] === '1' ? '上半年' : '下半年') : `${half[1]}年${half[2] === '1' ? '上半年' : '下半年'}`
+  if (value === trendYear) return '全年'
+  if (/^\d{4}$/.test(value)) return `${value}年`
+  return value
+}
+
 function setPeriod(v) {
   staffPeriod.value = v
   loadData()
@@ -98,16 +117,13 @@ function renderTrend() {
   const t = trendData.value
   trendChart.setOption({
     tooltip: { trigger: 'axis' },
-    legend: { data: ['入职人数', '月末在岗'], top: 0, textStyle: { fontSize: 11 } },
+    legend: { data: ['在职人数', '入职人数'], top: 0, textStyle: { fontSize: 11 } },
     grid: { left: 40, right: 44, top: 30, bottom: 24 },
-    xAxis: { type: 'category', data: t.map(x => x.month), axisLabel: { fontSize: 10, interval: 0 } },
-    yAxis: [
-      { type: 'value', name: '入职', minInterval: 1, axisLabel: { fontSize: 10 } },
-      { type: 'value', name: '在岗', minInterval: 1, axisLabel: { fontSize: 10 }, splitLine: { show: false } },
-    ],
+    xAxis: { type: 'category', data: t.map(x => formatTrendPeriod(x.month)), axisLabel: { fontSize: 10, interval: 0 } },
+    yAxis: { type: 'value', name: '人数', minInterval: 1, axisLabel: { fontSize: 10 } },
     series: [
-      { name: '入职人数', type: 'bar', barMaxWidth: 16, data: t.map(x => x.hires), itemStyle: { color: '#4f46e5', borderRadius: [3, 3, 0, 0] } },
-      { name: '月末在岗', type: 'line', smooth: true, yAxisIndex: 1, data: t.map(x => x.headcount), lineStyle: { width: 2.5, color: '#059669' }, itemStyle: { color: '#059669' } },
+      { name: '在职人数', type: 'bar', barMaxWidth: 24, barGap: '10%', data: t.map(x => x.headcount), itemStyle: { color: '#4f46e5', borderRadius: [3, 3, 0, 0] }, label: { show: true, position: 'top', fontSize: 10, color: '#4f46e5' } },
+      { name: '入职人数', type: 'bar', barMaxWidth: 24, data: t.map(x => x.hires), itemStyle: { color: '#f59e0b', borderRadius: [3, 3, 0, 0] }, label: { show: true, position: 'top', fontSize: 10, color: '#b45309' } },
     ],
   }, true)
   trendChart.resize()
@@ -204,4 +220,5 @@ onUnmounted(() => {
   background: #fee2e2; color: #ef4444; font-size: 11px; cursor: pointer;
 }
 .filter-clear:hover { background: #fecaca; }
+
 </style>

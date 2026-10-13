@@ -22,14 +22,33 @@ logger = logging.getLogger("dingtalk_bitable")
 TOKEN_URL = "https://api.dingtalk.com/v1.0/oauth2/accessToken"
 BITABLE_BASE = "https://api.dingtalk.com/v1.0/notable"
 
-# ── 凭证读取 ──
+# ── 凭证与数据表配置 ──
+def _env(name: str, default: str = "") -> str:
+    """读取环境变量，兼容本地 backend/.env；绝不在代码中保存密钥。"""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            if key.strip() == name:
+                return raw_value.strip().strip("\"'")
+    return default
+
+
 _BITABLE_CREDS = {
-    "app_key": "dingeqrywskv5obkaygs",
-    "app_secret": "osQiznunErI27T9pn9zpiSBiN4uO0tR4S5Gfyf2hmCIIQqoKcL7pYbci9p4D4U4Q",
-    "corp_id": "ding71718385c5b64dd5acaaa37764f94726",
-    "app_id": "ZgpG2NdyVXKlg9pBUPyv1eMrWMwvDqPk",
-    "table_name": "人事招聘源数据",
-    "operator_id": "qlyRmOiSyhCiiqmlNmfykOeQiEiE",
+    "app_key": _env("DINGTALK_BITABLE_APP_KEY"),
+    "app_secret": _env("DINGTALK_BITABLE_APP_SECRET"),
+    "corp_id": _env("DINGTALK_BITABLE_CORP_ID"),
+    "app_id": _env("DINGTALK_BITABLE_BASE_ID"),
+    "table_name": _env("DINGTALK_BITABLE_TABLE_NAME", "人事招聘数据集"),
+    "sheet_id": _env("DINGTALK_BITABLE_SHEET_ID", "HroRyqe"),
+    # 多维表 operatorId 使用 unionid；不要把员工 userid 直接传给接口。
+    "operator_id": _env("DINGTALK_BITABLE_OPERATOR_UNION_ID") or _env("DINGTALK_BITABLE_OPERATOR_ID"),
 }
 
 

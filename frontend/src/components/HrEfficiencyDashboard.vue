@@ -7,8 +7,9 @@
         <span class="update-tag">实时更新</span>
       </div>
       <div class="header-right">
+        <span class="source-note">{{ sourceLabel }}</span>
         <span class="update-time">🕐 {{ updatedAt }}</span>
-        <button class="refresh-btn" @click="loadData">🔄</button>
+        <button class="refresh-btn" @click="loadData(true)">🔄</button>
       </div>
     </header>
 
@@ -21,12 +22,16 @@
       </button>
     </div>
 
+    <div v-if="latestPeriodRow" class="kpi-context">
+      顶部指标对应当前视图最新有数据期间：{{ latestPeriodRow.label }}；下方明细展示完整{{ periodText }}序列
+    </div>
+
     <!-- KPI 卡片行 -->
     <div class="kpi-row">
       <div class="kpi-card" v-for="kpi in summaryCards" :key="kpi.label"
         :style="{ borderTop: `3px solid ${kpi.color}` }">
         <div class="kpi-label">{{ kpi.label }}</div>
-        <div class="kpi-value" :style="{ color: kpi.color }">{{ kpi.value }}</div>
+        <div class="kpi-value" :style="{ color: kpi.color }">{{ formatNumber(kpi.value) }}</div>
         <div class="kpi-unit">{{ kpi.unit }}</div>
       </div>
     </div>
@@ -36,7 +41,7 @@
       <div class="chart-card">
         <div class="chart-header">
           <h3>📈 营收与人力成本关系</h3>
-          <span class="badge">月度趋势对比</span>
+          <span class="badge">{{ periodText }}趋势对比</span>
         </div>
         <v-chart :option="revenueCostOption" autoresize class="chart-lg" />
       </div>
@@ -70,10 +75,28 @@
     <!-- 图表区域 — 第三行：人均指标对比 -->
     <div class="chart-card full-width">
       <div class="chart-header">
-        <h3>🎯 人均指标月度对比</h3>
+        <h3>🎯 人均指标{{ periodText }}对比</h3>
         <span class="badge">人均收入 · 人均成本 · 人均净利润</span>
       </div>
       <v-chart :option="perCapitaOption" autoresize class="chart-xl" />
+    </div>
+
+    <!-- 公司人效看板中的部门数据 -->
+    <div class="chart-row">
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>🏢 各部门人数记录汇总</h3>
+          <span class="badge">按有效部门记录汇总</span>
+        </div>
+        <v-chart :option="departmentHeadcountOption" autoresize class="chart-lg" />
+      </div>
+      <div class="chart-card">
+        <div class="chart-header">
+          <h3>💼 部门营收对比</h3>
+          <span class="badge">源表有效记录营收</span>
+        </div>
+        <v-chart :option="departmentRevenueOption" autoresize class="chart-lg" />
+      </div>
     </div>
 
     <!-- 月度数据明细表格 -->
@@ -82,14 +105,15 @@
         <h3>📋 人效数据明细</h3>
         <span class="badge">{{ periodText }}视图</span>
       </div>
+      <div v-if="sourceNote" class="data-source-note">数据口径：{{ sourceNote }}</div>
       <div class="table-wrapper">
         <table class="data-table">
           <thead>
             <tr>
               <th>期间</th>
-              <th>营收(万)</th>
-              <th>净利润(万)</th>
-              <th>人力总成本(万)</th>
+              <th>营收（源表值）</th>
+              <th>净利润（源表值）</th>
+              <th>人力总成本（源表值）</th>
               <th>在岗人数</th>
               <th>人均收入(万)</th>
               <th>人均成本(万)</th>
@@ -100,16 +124,17 @@
           <tbody>
             <tr v-for="row in monthly" :key="row.month">
               <td class="month-cell">{{ row.label }}</td>
-              <td>{{ row.revenue }}</td>
-              <td>{{ row.net_profit }}</td>
-              <td>{{ row.total_labor_cost }}</td>
-              <td>{{ row.headcount }}</td>
-              <td>{{ row.revenue_per_employee }}</td>
-              <td>{{ row.cost_per_employee }}</td>
-              <td>{{ row.profit_per_employee }}</td>
+              <td>{{ formatNumber(row.revenue) }}</td>
+              <td>{{ formatNumber(row.net_profit) }}</td>
+              <td>{{ formatNumber(row.total_labor_cost) }}</td>
+              <td>{{ formatNumber(row.headcount) }}</td>
+              <td>{{ formatNumber(row.revenue_per_employee) }}</td>
+              <td>{{ formatNumber(row.cost_per_employee) }}</td>
+              <td>{{ formatNumber(row.profit_per_employee) }}</td>
               <td>
-                <span :class="['badge-eff', row.cost_efficiency >= 2.0 ? 'high' : row.cost_efficiency >= 1.5 ? 'mid' : 'low']">
-                  {{ row.cost_efficiency }}
+                <span v-if="row.cost_efficiency !== null && row.cost_efficiency !== undefined"
+                  :class="['badge-eff', row.cost_efficiency >= 2.0 ? 'high' : row.cost_efficiency >= 1.5 ? 'mid' : 'low']">
+                  {{ formatNumber(row.cost_efficiency) }}
                 </span>
               </td>
             </tr>
@@ -149,6 +174,9 @@ use([
 
 const monthly = ref([])
 const summary = ref(null)
+const departments = ref([])
+const sourceLabel = ref('数据源加载中')
+const sourceNote = ref('')
 const updatedAt = ref('--')
 const activeTab = ref('efficiency')
 let timer = null
@@ -166,6 +194,22 @@ function setPeriod(v) {
   period.value = v
   loadData()
 }
+
+// 所有数值统一显示两位小数；缺失月份保留为空白。
+function formatNumber(value) {
+  if (value === null || value === undefined || value === '') return ''
+  const number = Number(value)
+  return Number.isFinite(number) ? number.toFixed(2) : ''
+}
+
+function formatTooltipParams(params) {
+  const items = Array.isArray(params) ? params : [params]
+  const first = items[0]
+  if (!first) return ''
+  const title = first.axisValueLabel ?? first.axisValue ?? ''
+  const lines = items.map(item => `${item.marker || ''}${item.seriesName || ''}: ${formatNumber(item.value)}`)
+  return `${title}<br/>${lines.join('<br/>')}`
+}
 // 图表 x 轴标签（后端 label：2024-01 / 2024-Q1 / 2024-H1 / 2024）
 const xLabels = computed(() => monthly.value.map(m => m.label))
 
@@ -180,22 +224,37 @@ const COLORS = {
   costEff: '#f97316',
 }
 
+// 顶部 KPI 跟随当前粒度展示最近一个有数据的期间，避免月/季/半年视图
+// 仍显示同一份年度汇总而造成“切换无效”的错觉。年度视图使用年度汇总行。
+const latestPeriodRow = computed(() => {
+  const rows = monthly.value.filter(row => row.revenue !== null && row.revenue !== undefined)
+  return rows.length ? rows[rows.length - 1] : null
+})
+
 const summaryCards = computed(() => {
-  const s = summary.value
-  if (!s) return []
+  const row = latestPeriodRow.value
+  if (!row) return []
+  const prefix = period.value === 'year' ? '年度' : `最新${periodText.value}`
   return [
-    { label: '年度营收', value: s.total_revenue, unit: '万元', color: COLORS.revenue },
-    { label: '年度净利润', value: s.total_net_profit, unit: '万元', color: COLORS.netProfit },
-    { label: '年均在岗人数', value: s.avg_headcount, unit: '人', color: COLORS.headcount },
-    { label: '人均收入', value: s.avg_revenue_per_employee, unit: '万元', color: COLORS.revPerEmp },
-    { label: '人均成本', value: s.avg_cost_per_employee, unit: '万元', color: COLORS.costPerEmp },
-    { label: '人均净利润', value: s.avg_profit_per_employee, unit: '万元', color: COLORS.profitPerEmp },
-    { label: '成本效能', value: s.avg_cost_efficiency, unit: '', color: COLORS.costEff },
+    { label: `${prefix}营收`, value: row.revenue, unit: '万元', color: COLORS.revenue },
+    { label: `${prefix}净利润`, value: row.net_profit, unit: '万元', color: COLORS.netProfit },
+    { label: `${prefix}在岗人数`, value: row.headcount, unit: '人', color: COLORS.headcount },
+    { label: `${prefix}人均收入`, value: row.revenue_per_employee, unit: '万元', color: COLORS.revPerEmp },
+    { label: `${prefix}人均成本`, value: row.cost_per_employee, unit: '万元', color: COLORS.costPerEmp },
+    { label: `${prefix}人均净利润`, value: row.profit_per_employee, unit: '万元', color: COLORS.profitPerEmp },
+    { label: `${prefix}成本效能`, value: row.cost_efficiency, unit: '', color: COLORS.costEff },
   ]
 })
 
 // 图表通用 tooltip
-const tooltip = { trigger: 'axis', backgroundColor: 'rgba(255,255,255,0.96)', borderWidth: 0, borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }
+const tooltip = {
+  trigger: 'axis',
+  formatter: formatTooltipParams,
+  backgroundColor: 'rgba(255,255,255,0.96)',
+  borderWidth: 0,
+  borderRadius: 8,
+  boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+}
 
 // 1. 营收与人力成本关系
 const revenueCostOption = computed(() => ({
@@ -274,7 +333,7 @@ const profitCostOption = computed(() => ({
 
 // 4. 成本效能趋势
 const costEfficiencyOption = computed(() => ({
-  tooltip: { ...tooltip, formatter: params => `${params[0].axisValue}<br/>成本效能：<strong>${params[0].value}</strong> （每元成本产出营收）` },
+  tooltip: { ...tooltip, formatter: params => `${params[0].axisValue}<br/>成本效能：<strong>${formatNumber(params[0].value)}</strong> （每元成本产出营收）` },
   grid: { top: 20, right: 20, bottom: 40, left: 50 },
   xAxis: { type: 'category', data: xLabels.value, axisLabel: { fontSize: 11 } },
   yAxis: { type: 'value', name: '成本效能', nameTextStyle: { fontSize: 11, color: '#888' }, splitLine: { lineStyle: { type: 'dashed', color: '#eee' } } },
@@ -340,11 +399,38 @@ const perCapitaOption = computed(() => ({
   ],
 }))
 
-async function loadData() {
+// 6. 部门人数记录汇总
+const departmentHeadcountOption = computed(() => ({
+  tooltip: { ...tooltip, formatter: params => `${params[0]?.name || ''}<br/>有效记录人数：<strong>${formatNumber(params[0]?.value)}</strong>` },
+  grid: { top: 20, right: 20, bottom: 40, left: 50 },
+  xAxis: { type: 'category', data: departments.value.map(d => d.department), axisLabel: { fontSize: 11 } },
+  yAxis: { type: 'value', name: '人数记录合计', nameTextStyle: { fontSize: 11, color: '#888' }, splitLine: { lineStyle: { type: 'dashed', color: '#eee' } } },
+  series: [{
+    name: '有效记录人数', type: 'bar', data: departments.value.map(d => d.headcount),
+    itemStyle: { color: COLORS.headcount, borderRadius: [4, 4, 0, 0] }, barWidth: '42%',
+  }],
+}))
+
+// 7. 部门营收对比（保持钉钉源表显示值）
+const departmentRevenueOption = computed(() => ({
+  tooltip: { ...tooltip, formatter: params => `${params[0]?.name || ''}<br/>营收（源表值）：<strong>${formatNumber(params[0]?.value)}</strong>` },
+  grid: { top: 20, right: 30, bottom: 40, left: 70 },
+  xAxis: { type: 'category', data: departments.value.map(d => d.department), axisLabel: { fontSize: 11 } },
+  yAxis: { type: 'value', name: '营收（源表值）', nameTextStyle: { fontSize: 11, color: '#888' }, splitLine: { lineStyle: { type: 'dashed', color: '#eee' } } },
+  series: [{
+    name: '部门营收', type: 'bar', data: departments.value.map(d => d.revenue),
+    itemStyle: { color: COLORS.revenue, borderRadius: [4, 4, 0, 0] }, barWidth: '42%',
+  }],
+}))
+
+async function loadData(force = false) {
   try {
-    const data = await fetchHrEfficiency(period.value)
+    const data = await fetchHrEfficiency(period.value, { force })
     monthly.value = data.monthly || []
     summary.value = data.summary
+    departments.value = data.departments || []
+    sourceLabel.value = data.source || '公司人效数据'
+    sourceNote.value = data.source_note || ''
     updatedAt.value = data.updated_at || new Date().toLocaleString()
   } catch (err) {
     console.error('加载人效数据失败:', err)
@@ -375,6 +461,10 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   padding: 2px 10px; border-radius: 10px; font-weight: 500;
 }
 .header-right { display: flex; align-items: center; gap: 14px; }
+.source-note {
+  max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: #6b7280; background: #f3f4f6; padding: 4px 9px; border-radius: 8px;
+}
 .update-time { font-size: 13px; color: #888; }
 .refresh-btn {
   padding: 7px 14px; border: none; border-radius: 6px;
@@ -391,6 +481,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 }
 .period-btn:hover { border-color: #4f46e5; color: #4f46e5; }
 .period-btn.active { background: #4f46e5; color: #fff; border-color: #4f46e5; }
+.kpi-context {
+  color: #64748b; font-size: 12px; margin-top: -8px;
+}
 
 /* KPI 卡片行 */
 .kpi-row {
@@ -466,6 +559,15 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .chart-xl {
   height: 320px;
   width: 100%;
+}
+.data-source-note {
+  margin: -2px 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 /* 数据表格 */

@@ -302,7 +302,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import axios from 'axios'
 import * as echarts from 'echarts'
 
@@ -318,6 +318,7 @@ const updatedAt = ref('')
 const filterDept = ref('')
 const barEl = ref(null)
 let barChart = null
+let chartRenderFrame = null
 
 const monthLabel = computed(() => (month.value || '').replace('-', '年') + '月')
 
@@ -361,8 +362,7 @@ async function loadStats() {
   try {
     const res = await axios.get('/api/onduty-stats', { params: { month: month.value } })
     applyStatsData(res.data)
-    await nextTick()
-    renderCharts()
+    await scheduleChartRender()
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
   } finally {
@@ -379,8 +379,7 @@ async function syncStats() {
       timeout: 120000,
     })
     applyStatsData(res.data)
-    await nextTick()
-    renderCharts()
+    await scheduleChartRender()
   } catch (e) {
     error.value = e.response?.data?.detail || e.message
   } finally {
@@ -396,12 +395,36 @@ function applyStatsData(data) {
   updatedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+// 数据更新和 v-if 同时变化时，单次 nextTick 可能仍早于图表容器挂载。
+// 在 DOM 更新后的下一帧再初始化，并在容器被重建时释放旧实例。
+async function scheduleChartRender() {
+  await nextTick()
+  if (chartRenderFrame) cancelAnimationFrame(chartRenderFrame)
+  chartRenderFrame = requestAnimationFrame(() => {
+    chartRenderFrame = null
+    renderCharts()
+  })
+}
+
+watch(
+  () => [loading.value, stats.value.depts?.length || 0],
+  ([isLoading, deptCount]) => {
+    if (!isLoading && deptCount) scheduleChartRender()
+  },
+  { flush: 'post' },
+)
+
 function renderCharts() {
   if (!barEl.value || !stats.value.depts?.length) return
   const depts = stats.value.depts
 
   // 部门人均在岗时长排行（横向柱状）
+  if (barChart && barChart.getDom() !== barEl.value) {
+    barChart.dispose()
+    barChart = null
+  }
   barChart = barChart || echarts.init(barEl.value)
+  barChart.resize()
   barChart.setOption({
     tooltip: {
       trigger: 'axis', axisPointer: { type: 'shadow' },
@@ -444,6 +467,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  if (chartRenderFrame) cancelAnimationFrame(chartRenderFrame)
   barChart?.dispose()
 })
 </script>
